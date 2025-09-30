@@ -143,11 +143,6 @@ $core = {
         $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
         $csvWriter.WriteLine($line)
     }
-
-
-  # Escapar y escribir
-  $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
-  $csvWriter.WriteLine($line)
 }
 
     # --- Preparar CSV incremental ---
