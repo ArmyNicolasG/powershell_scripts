@@ -29,12 +29,6 @@
 
 .PARAMETER LogPath
   Ruta de archivo .log para registrar cada carpeta/archivo y errores durante la ejecución.
-
-.EXAMPLE
-  .\Get-FileTreeReport.ps1 -Path "D:\Volumen\Proyectos" -OutCsv "C:\Temp\reporte.csv" -LogPath "C:\Temp\reporte.log"
-
-.EXAMPLE
-  .\Get-FileTreeReport.ps1 -Path "\\FS01\Compartido" -Depth 3 -Utc -OutCsv "C:\Temp\reporte.csv" -LogPath "C:\Temp\reporte.log"
 #>
 
 [CmdletBinding()]
@@ -97,15 +91,23 @@ $core = {
     }
 
     function Write-Log {
-      param([string]$Message,[string]$Level = "INFO")
+      param([string]$Message,[ValidateSet('INFO','WARN','ERROR')][string]$Level = "INFO")
       $ts = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz',[System.Globalization.CultureInfo]::InvariantCulture)
       $line = "[$ts][$Level] $Message"
-      Write-Host $line
+      switch ($Level) {
+        'INFO'  { Write-Host    $line }
+        'WARN'  { Write-Warning $line }
+        'ERROR' { Write-Error   $line }
+      }
       if ($null -ne $logWriter) { $logWriter.WriteLine($line) }
     }
 
     # --- Preparar CSV incremental ---
-    $columns = @('Type','Name','Path','ItemCountImmediate','ItemCountTotal','FolderSizeBytes','FileSizeBytes','LastWriteTime')
+    $columns = @(
+      'Type','Name','Path',
+      'ItemCountImmediate','ItemCountTotal','FolderSizeBytes','FileSizeBytes',
+      'LastWriteTime','UserHasAccess'            # <--- NUEVA COLUMNA
+    )
     if ($OutCsv) {
       $csvDir = Split-Path -Parent $OutCsv
       if ($csvDir -and -not (Test-Path $csvDir)) { New-Item -ItemType Directory -Path $csvDir | Out-Null }
@@ -130,18 +132,13 @@ $core = {
     function Write-CsvRow {
       param([psobject]$Row)
       if ($null -eq $csvWriter) { return }
-
-      # Forzar orden de columnas y escapes correctos
       $ordered = [ordered]@{}
       foreach ($c in $columns) { $ordered[$c] = $Row.$c }
       $tmp = New-Object psobject -Property $ordered
-
-      # ConvertTo-Csv produce una cabecera + datos; nos quedamos solo con la fila (Skip 1)
       $csvLines = $tmp | ConvertTo-Csv -NoTypeInformation
       if ($csvLines.Count -ge 2) {
         $csvWriter.WriteLine($csvLines[1])
       } elseif ($csvLines.Count -eq 1) {
-        # Caso raro: sin encabezado; escribe única línea
         $csvWriter.WriteLine($csvLines[0])
       }
     }
@@ -181,22 +178,45 @@ $core = {
     $allDirsEnum = @($rootDir) + (Get-Children -Base $Path -DirsOnly -Depth $Depth)
 
     foreach ($d in $allDirsEnum) {
+      $userHasAccess = $true
       try {
         # Inmediatos (no recursivo)
         $immediateCount = 0
-        Get-ChildItem -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue |
-          ForEach-Object { $immediateCount++ }
+        try {
+          Get-ChildItem -LiteralPath $d.FullName -Force -ErrorAction Stop |
+            ForEach-Object { $immediateCount++ }
+        }
+        catch {
+          if ($_.Exception -is [System.UnauthorizedAccessException] -or
+              $_.Exception -is [System.Security.SecurityException]) {
+            $userHasAccess = $false
+            Write-Log ("ACCESS DENIED (inmediatos): '{0}' -> {1}" -f $d.FullName, $_.Exception.Message) "WARN"
+            $immediateCount = 0
+          } else { throw }
+        }
 
-        # Recursivo: contar items totales y acumular tamaño solo de archivos (streaming)
+        # Recursivo: contar items totales y acumular tamaño
         $totalItems = 0
         $totalSize  = [int64]0
-        Get-ChildItem -LiteralPath $d.FullName -Force -Recurse -ErrorAction SilentlyContinue |
-          ForEach-Object {
-            $totalItems++
-            if (-not $_.PSIsContainer) {
-              $totalSize += [int64]$_.Length
+        try {
+          Get-ChildItem -LiteralPath $d.FullName -Force -Recurse -ErrorAction Stop |
+            ForEach-Object {
+              $totalItems++
+              if (-not $_.PSIsContainer) {
+                $totalSize += [int64]$_.Length
+              }
             }
-          }
+        }
+        catch {
+          if ($_.Exception -is [System.UnauthorizedAccessException] -or
+              $_.Exception -is [System.Security.SecurityException]) {
+            $userHasAccess = $false
+            Write-Log ("ACCESS DENIED (recursivo): '{0}' -> {1}" -f $d.FullName, $_.Exception.Message) "WARN"
+            # Mantener contadores en 0 si no se pudo recorrer
+            $totalItems = 0
+            $totalSize  = 0
+          } else { throw }
+        }
 
         $row = [pscustomobject]@{
           Type               = 'Folder'
@@ -207,16 +227,15 @@ $core = {
           FolderSizeBytes    = $totalSize
           FileSizeBytes      = $null
           LastWriteTime      = (Format-Date -dt $d.LastWriteTime -AsUtc:$asUtcBool)
+          UserHasAccess      = [bool]$userHasAccess
         }
 
         # Log por carpeta
-        Write-Log ("FOLDER: Path='{0}' Immediate={1} TotalItems={2} SizeBytes={3} LastWrite='{4}'" -f `
-          $row.Path, $row.ItemCountImmediate, $row.ItemCountTotal, $row.FolderSizeBytes, $row.LastWriteTime)
+        $lvl = $userHasAccess ? 'INFO' : 'WARN'
+        Write-Log ("FOLDER: Path='{0}' Immediate={1} TotalItems={2} SizeBytes={3} LastWrite='{4}' Access={5}" -f `
+          $row.Path, $row.ItemCountImmediate, $row.ItemCountTotal, $row.FolderSizeBytes, $row.LastWriteTime, $row.UserHasAccess) $lvl
 
-        # CSV inmediato
         Write-CsvRow -Row $row
-
-        # Emitir a la tubería (por si el caller lo necesita)
         $row
       }
       catch {
@@ -230,6 +249,7 @@ $core = {
           FolderSizeBytes    = 0
           FileSizeBytes      = $null
           LastWriteTime      = (Format-Date -dt $d.LastWriteTime -AsUtc:$asUtcBool)
+          UserHasAccess      = $false
         }
         Write-CsvRow -Row $row
         $row
@@ -240,7 +260,24 @@ $core = {
     Get-Children -Base $Path -FilesOnly -Depth $Depth |
       ForEach-Object {
         $f = $_
+        $userHasAccess = $true
         try {
+          $size = $null
+          $lw   = $null
+          try {
+            $size = [int64]$f.Length
+            $lw   = (Format-Date -dt $f.LastWriteTime -AsUtc:$asUtcBool)
+          }
+          catch {
+            if ($_.Exception -is [System.UnauthorizedAccessException] -or
+                $_.Exception -is [System.Security.SecurityException]) {
+              $userHasAccess = $false
+              Write-Log ("ACCESS DENIED (file props): '{0}' -> {1}" -f $f.FullName, $_.Exception.Message) "WARN"
+              $size = 0
+              $lw   = $null
+            } else { throw }
+          }
+
           $row = [pscustomobject]@{
             Type               = 'File'
             Name               = $f.Name
@@ -248,18 +285,16 @@ $core = {
             ItemCountImmediate = $null
             ItemCountTotal     = $null
             FolderSizeBytes    = $null
-            FileSizeBytes      = [int64]$f.Length
-            LastWriteTime      = (Format-Date -dt $f.LastWriteTime -AsUtc:$asUtcBool)
+            FileSizeBytes      = $size
+            LastWriteTime      = $lw
+            UserHasAccess      = [bool]$userHasAccess
           }
 
-          # Log por archivo
-          Write-Log ("FILE: Path='{0}' SizeBytes={1} LastWrite='{2}'" -f `
-            $row.Path, $row.FileSizeBytes, $row.LastWriteTime)
+          $lvl = $userHasAccess ? 'INFO' : 'WARN'
+          Write-Log ("FILE: Path='{0}' SizeBytes={1} LastWrite='{2}' Access={3}" -f `
+            $row.Path, $row.FileSizeBytes, $row.LastWriteTime, $row.UserHasAccess) $lvl
 
-          # CSV inmediato
           Write-CsvRow -Row $row
-
-          # Emitir a la tubería
           $row
         }
         catch {
@@ -273,6 +308,7 @@ $core = {
             FolderSizeBytes    = $null
             FileSizeBytes      = 0
             LastWriteTime      = $null
+            UserHasAccess      = $false
           }
           Write-CsvRow -Row $row
           $row
@@ -296,8 +332,6 @@ try {
     $result = Invoke-Remote -ComputerName $ComputerName -Script $core -ParamMap $paramMap
   }
 
-  # Si OutCsv se especificó, ya se fue escribiendo incrementalmente.
-  # Aun así devolvemos a la tubería los objetos (por si el caller los captura).
   if (-not $OutCsv) {
     $result
   } else {
