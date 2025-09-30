@@ -78,7 +78,6 @@ $core = {
 
   $logWriter = $null
   $csvWriter = $null
-  $csvHeaderWritten = $false
 
   try {
     # --- Preparar LOG ---
@@ -102,50 +101,57 @@ $core = {
       if ($null -ne $logWriter) { $logWriter.WriteLine($line) }
     }
 
-    # --- Preparar CSV incremental ---
-        $columns = @(
-        'Type','Name','Path',
-        'ItemCountImmediate','ItemCountTotal','FolderSizeBytes','FileSizeBytes',
-        'LastWriteTime','UserHasAccess'
-        )
+    # --- Definir columnas y utilidades CSV (sin ConvertTo-Csv) ---
+    $columns = @(
+      'Type','Name','Path',
+      'ItemCountImmediate','ItemCountTotal','FolderSizeBytes','FileSizeBytes',
+      'LastWriteTime','UserHasAccess'
+    )
 
-        if ($OutCsv) {
-        $csvDir = Split-Path -Parent $OutCsv
-        if ($csvDir -and -not (Test-Path $csvDir)) { New-Item -ItemType Directory -Path $csvDir | Out-Null }
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        $fileExists = Test-Path -LiteralPath $OutCsv
-        $csvWriter = New-Object System.IO.StreamWriter($OutCsv, $true, $utf8NoBom)
-        $csvWriter.AutoFlush = $true
+    function Escape-CsvValue {
+      param([object]$v)
+      if ($null -eq $v) { return '' }
+      $s = [string]$v
+      # Doble comillas internas y envolver en comillas si contiene coma, comillas o salto de línea
+      $needsQuotes = $s.Contains('"') -or $s.Contains(',') -or $s.Contains("`n") -or $s.Contains("`r")
+      if ($s.Contains('"')) { $s = $s -replace '"','""' }
+      if ($needsQuotes) { return '"' + $s + '"' }
+      return $s
+    }
 
-        # Escribir header solo si el archivo no existe o está vacío
-        $needHeader = $true
-        if ($fileExists) {
-            $len = (Get-Item -LiteralPath $OutCsv).Length
-            if ($len -gt 0) { $needHeader = $false }
-        }
-        if ($needHeader) {
-            # Crear un objeto *vacío* con las propiedades deseadas y
-            # usar su cabecera que sí respeta los nombres de columnas
-            $hdrObj = New-Object psobject
-            foreach ($c in $columns) { Add-Member -InputObject $hdrObj -NotePropertyName $c -NotePropertyValue $null }
-            $headerLine = ($hdrObj | ConvertTo-Csv -NoTypeInformation)[0]
-            $csvWriter.WriteLine($headerLine)
-        }
-        $csvHeaderWritten = $true
-        }
+    function Write-CsvHeader {
+      param([string[]]$Cols)
+      if ($null -eq $csvWriter) { return }
+      $line = ($Cols | ForEach-Object { Escape-CsvValue $_ }) -join ','
+      $csvWriter.WriteLine($line)
+    }
 
     function Write-CsvRow {
       param([psobject]$Row)
       if ($null -eq $csvWriter) { return }
-      $ordered = [ordered]@{}
-      foreach ($c in $columns) { $ordered[$c] = $Row.$c }
-      $tmp = New-Object psobject -Property $ordered
-      $csvLines = $tmp | ConvertTo-Csv -NoTypeInformation
-      if ($csvLines.Count -ge 2) {
-        $csvWriter.WriteLine($csvLines[1])
-      } elseif ($csvLines.Count -eq 1) {
-        $csvWriter.WriteLine($csvLines[0])
+      $vals = foreach ($c in $columns) {
+        $Row.PSObject.Properties.Match($c) | ForEach-Object { $_.Value }
+        if (-not ($Row.PSObject.Properties.Name -contains $c)) { $null }
       }
+      $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
+      $csvWriter.WriteLine($line)
+    }
+
+    # --- Preparar CSV incremental ---
+    if ($OutCsv) {
+      $csvDir = Split-Path -Parent $OutCsv
+      if ($csvDir -and -not (Test-Path $csvDir)) { New-Item -ItemType Directory -Path $csvDir | Out-Null }
+      $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+      $fileExists = Test-Path -LiteralPath $OutCsv
+      $csvWriter = New-Object System.IO.StreamWriter($OutCsv, $true, $utf8NoBom)
+      $csvWriter.AutoFlush = $true
+
+      $needHeader = $true
+      if ($fileExists) {
+        $len = (Get-Item -LiteralPath $OutCsv).Length
+        if ($len -gt 0) { $needHeader = $false }
+      }
+      if ($needHeader) { Write-CsvHeader -Cols $columns }
     }
 
     # Validar ruta base
@@ -217,7 +223,6 @@ $core = {
               $_.Exception -is [System.Security.SecurityException]) {
             $userHasAccess = $false
             Write-Log ("ACCESS DENIED (recursivo): '{0}' -> {1}" -f $d.FullName, $_.Exception.Message) "WARN"
-            # Mantener contadores en 0 si no se pudo recorrer
             $totalItems = 0
             $totalSize  = 0
           } else { throw }
@@ -235,7 +240,6 @@ $core = {
           UserHasAccess      = [bool]$userHasAccess
         }
 
-        # Log por carpeta
         $lvl = $userHasAccess ? 'INFO' : 'WARN'
         Write-Log ("FOLDER: Path='{0}' Immediate={1} TotalItems={2} SizeBytes={3} LastWrite='{4}' Access={5}" -f `
           $row.Path, $row.ItemCountImmediate, $row.ItemCountTotal, $row.FolderSizeBytes, $row.LastWriteTime, $row.UserHasAccess) $lvl
