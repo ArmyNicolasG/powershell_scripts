@@ -127,15 +127,28 @@ $core = {
     }
 
     function Write-CsvRow {
-      param([psobject]$Row)
-      if ($null -eq $csvWriter) { return }
-      $vals = foreach ($c in $columns) {
-        $Row.PSObject.Properties.Match($c) | ForEach-Object { $_.Value }
-        if (-not ($Row.PSObject.Properties.Name -contains $c)) { $null }
-      }
-      $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
-      $csvWriter.WriteLine($line)
+        param([psobject]$Row)
+        if ($null -eq $csvWriter) { return }
+
+        # 1 valor por columna, en el mismo orden del header
+        $vals = foreach ($c in $columns) {
+            if ($Row.PSObject.Properties.Name -contains $c) {
+            $Row.$c
+            } else {
+            $null
+            }
+        }
+
+        # Escapar y escribir
+        $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
+        $csvWriter.WriteLine($line)
     }
+
+
+  # Escapar y escribir
+  $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
+  $csvWriter.WriteLine($line)
+}
 
     # --- Preparar CSV incremental ---
     if ($OutCsv) {
