@@ -1,31 +1,3 @@
-<# 
-.SYNOPSIS
-  Agrega (no reemplaza) Control total para una cuenta de dominio a todos los archivos y carpetas bajo una ruta, recursivo.
-  Mantiene permisos existentes y herencia tal como están. Soporta logging en tiempo real.
-
-.PARAMETER Path
-  Ruta raíz (ej. D:\Datos o \\FS01\Compartido).
-
-.PARAMETER Account
-  Cuenta a la que se le otorgará Control total (ej. CONTOSO\svc_auditor o auditor@contoso.com).
-
-.PARAMETER LogPath
-  Ruta de archivo .log (UTF-8) donde se registrará la ejecución en tiempo real (opcional).
-
-.PARAMETER TakeOwnership
-  Si se indica, INTENTA tomar propiedad de los objetos antes de conceder permisos (ayuda con Access Denied al cambiar ACL).
-  No cambia herencia ni borra ACEs, pero sí cambia el OWNER del objeto (metadato de seguridad). Úsalo sólo si lo necesitas.
-
-.EXAMPLE
-  .\ps_SetSuperAdminAccountPermissions.ps1 -Path "D:\Data" -Account "CONTOSO\svc_auditor" -LogPath "C:\Temp\grant.log"
-
-.EXAMPLE
-  .\ps_SetSuperAdminAccountPermissions.ps1 -Path "\\FS01\Compartido" -Account "auditor@contoso.com" -TakeOwnership -LogPath "C:\Temp\grant.log"
-
-.NOTES
-  Ejecuta en consola elevada. `-WhatIf` y `-Confirm` funcionan al ser función avanzada con SupportsShouldProcess.
-#>
-
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
 param(
   [Parameter(Mandatory=$true)]
@@ -36,13 +8,15 @@ param(
 
   [string]$LogPath,
 
-  [switch]$TakeOwnership
+  [switch]$TakeOwnership,
+
+  [switch]$UseLongPath  # opcional: forzar prefijo \\?\ para rutas largas
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ----- Helpers -----
+# --- Helpers ---
 function Write-Log {
   param([string]$Message, [string]$Level = 'INFO')
   $ts = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz', [System.Globalization.CultureInfo]::InvariantCulture)
@@ -58,23 +32,33 @@ function Ensure-Dir([string]$FilePath) {
   }
 }
 
-# Resuelve cuenta a SID si es posible (icacls acepta SID con prefijo *)
+# PSPath -> ruta nativa para procesos externos (UNC o local)
+function Get-NativePath {
+  param([Parameter(Mandatory=$true)][string]$LiteralPath, [switch]$Long)
+  $native = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LiteralPath)
+  if (-not $Long) { return $native }
+
+  if ($native -like '\\*') {
+    # UNC -> \\?\UNC\server\share\resto
+    if ($native -like '\\?\*') { return $native } # ya es long
+    return '\\?\UNC\' + $native.TrimStart('\')
+  } else {
+    # Local -> \\?\C:\...
+    if ($native -like '\\?\*') { return $native }
+    return '\\?\' + $native
+  }
+}
+
 function Resolve-AccountToSidOrName([string]$acct) {
   try {
     $nt = New-Object System.Security.Principal.NTAccount($acct)
     $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier])
-    return "*$($sid.Value)"  # formato icacls para SID explícito
-  } catch {
-    return $acct            # DOM\sam o UPN; icacls intentará resolverlo
-  }
+    return "*$($sid.Value)"  # icacls acepta *SID
+  } catch { return $acct }
 }
 
-# Ejecuta un proceso y vuelca stdout/stderr a log en tiempo real
 function Invoke-External {
-  param(
-    [string]$FilePath,
-    [string]$ArgumentString   # una sola cadena con todos los argumentos ya entrecomillados
-  )
+  param([string]$FilePath, [string]$ArgumentString)
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FilePath
   $psi.Arguments = $ArgumentString
@@ -84,34 +68,28 @@ function Invoke-External {
   $psi.CreateNoWindow = $true
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $psi
-
   [void]$p.Start()
   while (-not $p.HasExited) {
-    if (-not $p.StandardOutput.EndOfStream) {
-      Write-Log ($p.StandardOutput.ReadLine()) 'ICACLS'
-    }
-    if (-not $p.StandardError.EndOfStream) {
-      Write-Log ($p.StandardError.ReadLine()) 'ICACLS-ERR'
-    }
+    if (-not $p.StandardOutput.EndOfStream) { Write-Log ($p.StandardOutput.ReadLine()) 'ICACLS' }
+    if (-not $p.StandardError.EndOfStream)  { Write-Log ($p.StandardError.ReadLine())  'ICACLS-ERR' }
     Start-Sleep -Milliseconds 50
   }
-  while (-not $p.StandardOutput.EndOfStream) {
-    Write-Log ($p.StandardOutput.ReadLine()) 'ICACLS'
-  }
-  while (-not $p.StandardError.EndOfStream) {
-    Write-Log ($p.StandardError.ReadLine()) 'ICACLS-ERR'
-  }
+  while (-not $p.StandardOutput.EndOfStream) { Write-Log ($p.StandardOutput.ReadLine()) 'ICACLS' }
+  while (-not $p.StandardError.EndOfStream)  { Write-Log ($p.StandardError.ReadLine())  'ICACLS-ERR' }
   return $p.ExitCode
 }
 
-# ----- Inicio -----
+# --- Inicio ---
 if (-not (Test-Path -LiteralPath $Path)) {
   throw "La ruta no existe o no es accesible: $Path"
 }
 
-$absPath = (Resolve-Path -LiteralPath $Path).Path
+# RUTA NATIVA (¡clave!)
+$nativePath = Get-NativePath -LiteralPath $Path -Long:$UseLongPath
+# ruta “bonita” para mostrar en log (sin prefijo PSProvider)
+$displayPath = Get-NativePath -LiteralPath $Path
 
-# Preparar logging
+# Logging
 $script:logWriter = $null
 try {
   if ($LogPath) {
@@ -120,52 +98,42 @@ try {
     $script:logWriter = New-Object System.IO.StreamWriter($LogPath, $true, $utf8NoBom)
     $script:logWriter.AutoFlush = $true
   }
-} catch {
-  Write-Warning "No se pudo abrir el log en '$LogPath': $($_.Exception.Message)"
-}
+} catch { Write-Warning "No se pudo abrir el log en '$LogPath': $($_.Exception.Message)" }
 
-$whatIfActive = $WhatIfPreference -eq $true
-Write-Log "Inicio. Path='$absPath' Account='$Account' TakeOwnership=$TakeOwnership WhatIf=$whatIfActive"
+Write-Log "Inicio. Path='$displayPath' Account='$Account' TakeOwnership=$TakeOwnership LongPath=$UseLongPath"
 
-# Herramientas
-$icacls = (Get-Command icacls.exe -ErrorAction Stop).Source
+$icacls  = (Get-Command icacls.exe -ErrorAction Stop).Source
 $takeown = (Get-Command takeown.exe -ErrorAction SilentlyContinue).Source
 
-# Principal para icacls
 $principal = Resolve-AccountToSidOrName $Account
 Write-Log "Principal para icacls: $principal"
 
-# 1) (Opcional) Tomar propiedad
+# 1) (Opcional) tomar propiedad
 if ($TakeOwnership) {
-  $action = "take ownership recursively"
-  $target = $absPath
-  if ($PSCmdlet.ShouldProcess($target, $action)) {
+  if ($PSCmdlet.ShouldProcess($displayPath, "take ownership recursively")) {
     if (-not $takeown) {
       Write-Log "takeown.exe no disponible; omitiendo TakeOwnership" "WARN"
     } else {
-      Write-Log "Tomando propiedad (recursivo). Esto NO altera herencia ni ACEs, solo el OWNER."
-      # takeown /F "path" /R /D Y
-      $argStr = "/F `"$absPath`" /R /D Y"
+      $argStr = "/F `"$nativePath`" /R /D Y"
+      Write-Log "Ejecutando: takeown $argStr"
       $exit = Invoke-External -FilePath $takeown -ArgumentString $argStr
       Write-Log "takeown exit code: $exit"
     }
   } else {
-    Write-Log "WHATIF: takeown /F `"$absPath`" /R /D Y"
+    Write-Log "WHATIF: takeown /F `"$nativePath`" /R /D Y"
   }
 }
 
-# 2) Conceder Control total sin reemplazar ACLs existentes
-# icacls "path" /grant "<principal>:(OI)(CI)F" /T /C
-$actionGrant = "grant FullControl (OI)(CI) to $Account recursively"
-$targetGrant = $absPath
-if ($PSCmdlet.ShouldProcess($targetGrant, $actionGrant)) {
+# 2) Conceder Control total sin reemplazar ACLs
+if ($PSCmdlet.ShouldProcess($displayPath, "grant FullControl (OI)(CI) to $Account recursively")) {
   Write-Log "Concediendo Control total (sin reemplazar ACLs existentes)..."
-  $grantSpec = "${principal}:(OI)(CI)F"
-  $argStr = "`"$absPath`" /grant `"$grantSpec`" /T /C"
+  $grantSpec = "$principal:(OI)(CI)F"
+  $argStr = "`"$nativePath`" /grant `"$grantSpec`" /T /C"
+  Write-Log "Ejecutando: icacls $argStr"
   $exit = Invoke-External -FilePath $icacls -ArgumentString $argStr
   Write-Log "icacls /grant exit code: $exit"
 } else {
-  Write-Log "WHATIF: icacls `"$absPath`" /grant `"$($principal):(OI)(CI)F`" /T /C"
+  Write-Log "WHATIF: icacls `"$nativePath`" /grant `"$($principal):(OI)(CI)F`" /T /C"
 }
 
 Write-Log "Fin."
