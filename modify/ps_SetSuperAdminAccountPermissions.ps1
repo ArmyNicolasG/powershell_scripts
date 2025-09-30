@@ -127,7 +127,7 @@ if ($TakeOwnership) {
 # 2) Conceder Control total sin reemplazar ACLs
 if ($PSCmdlet.ShouldProcess($displayPath, "grant FullControl (OI)(CI) to $Account recursively")) {
   Write-Log "Concediendo Control total (sin reemplazar ACLs existentes)..."
-  $grantSpec = "$principal:(OI)(CI)F"
+  $grantSpec = "${principal}:(OI)(CI)F"
   $argStr = "`"$nativePath`" /grant `"$grantSpec`" /T /C"
   Write-Log "Ejecutando: icacls $argStr"
   $exit = Invoke-External -FilePath $icacls -ArgumentString $argStr
