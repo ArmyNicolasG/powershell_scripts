@@ -103,31 +103,36 @@ $core = {
     }
 
     # --- Preparar CSV incremental ---
-    $columns = @(
-      'Type','Name','Path',
-      'ItemCountImmediate','ItemCountTotal','FolderSizeBytes','FileSizeBytes',
-      'LastWriteTime','UserHasAccess'            # <--- NUEVA COLUMNA
-    )
-    if ($OutCsv) {
-      $csvDir = Split-Path -Parent $OutCsv
-      if ($csvDir -and -not (Test-Path $csvDir)) { New-Item -ItemType Directory -Path $csvDir | Out-Null }
-      $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-      $fileExists = Test-Path -LiteralPath $OutCsv
-      $csvWriter = New-Object System.IO.StreamWriter($OutCsv, $true, $utf8NoBom)
-      $csvWriter.AutoFlush = $true
+        $columns = @(
+        'Type','Name','Path',
+        'ItemCountImmediate','ItemCountTotal','FolderSizeBytes','FileSizeBytes',
+        'LastWriteTime','UserHasAccess'
+        )
 
-      # Escribir header solo si el archivo no existe o está vacío
-      $needHeader = $true
-      if ($fileExists) {
-        $len = (Get-Item -LiteralPath $OutCsv).Length
-        if ($len -gt 0) { $needHeader = $false }
-      }
-      if ($needHeader) {
-        $headerLine = ($columns | ConvertTo-Csv -NoTypeInformation)[0]
-        $csvWriter.WriteLine($headerLine)
-      }
-      $csvHeaderWritten = $true
-    }
+        if ($OutCsv) {
+        $csvDir = Split-Path -Parent $OutCsv
+        if ($csvDir -and -not (Test-Path $csvDir)) { New-Item -ItemType Directory -Path $csvDir | Out-Null }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $fileExists = Test-Path -LiteralPath $OutCsv
+        $csvWriter = New-Object System.IO.StreamWriter($OutCsv, $true, $utf8NoBom)
+        $csvWriter.AutoFlush = $true
+
+        # Escribir header solo si el archivo no existe o está vacío
+        $needHeader = $true
+        if ($fileExists) {
+            $len = (Get-Item -LiteralPath $OutCsv).Length
+            if ($len -gt 0) { $needHeader = $false }
+        }
+        if ($needHeader) {
+            # Crear un objeto *vacío* con las propiedades deseadas y
+            # usar su cabecera que sí respeta los nombres de columnas
+            $hdrObj = New-Object psobject
+            foreach ($c in $columns) { Add-Member -InputObject $hdrObj -NotePropertyName $c -NotePropertyValue $null }
+            $headerLine = ($hdrObj | ConvertTo-Csv -NoTypeInformation)[0]
+            $csvWriter.WriteLine($headerLine)
+        }
+        $csvHeaderWritten = $true
+        }
 
     function Write-CsvRow {
       param([psobject]$Row)
