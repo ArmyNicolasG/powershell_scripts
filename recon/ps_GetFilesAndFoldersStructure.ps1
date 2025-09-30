@@ -1,4 +1,4 @@
-<# 
+<#
 .SYNOPSIS
   Reporte de archivos y carpetas con conteos y tamaños (CSV UTF-8 incremental + logging por ítem).
 
@@ -34,7 +34,7 @@
 [CmdletBinding()]
 param(
   [string]$ComputerName = 'localhost',
-  [Parameter(Mandatory=$true)]
+  [Parameter(Mandatory = $true)]
   [string]$Path,
   [int]$Depth = -1,   # -1 = sin límite; ej. 3 (solo PS7+)
   [string]$OutCsv,
@@ -90,8 +90,8 @@ $core = {
     }
 
     function Write-Log {
-      param([string]$Message,[ValidateSet('INFO','WARN','ERROR')][string]$Level = "INFO")
-      $ts = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz',[System.Globalization.CultureInfo]::InvariantCulture)
+      param([string]$Message, [ValidateSet('INFO','WARN','ERROR')][string]$Level = "INFO")
+      $ts = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz', [System.Globalization.CultureInfo]::InvariantCulture)
       $line = "[$ts][$Level] $Message"
       switch ($Level) {
         'INFO'  { Write-Host    $line }
@@ -112,7 +112,6 @@ $core = {
       param([object]$v)
       if ($null -eq $v) { return '' }
       $s = [string]$v
-      # Doble comillas internas y envolver en comillas si contiene coma, comillas o salto de línea
       $needsQuotes = $s.Contains('"') -or $s.Contains(',') -or $s.Contains("`n") -or $s.Contains("`r")
       if ($s.Contains('"')) { $s = $s -replace '"','""' }
       if ($needsQuotes) { return '"' + $s + '"' }
@@ -127,23 +126,14 @@ $core = {
     }
 
     function Write-CsvRow {
-        param([psobject]$Row)
-        if ($null -eq $csvWriter) { return }
-
-        # 1 valor por columna, en el mismo orden del header
-        $vals = foreach ($c in $columns) {
-            if ($Row.PSObject.Properties.Name -contains $c) {
-            $Row.$c
-            } else {
-            $null
-            }
-        }
-
-        # Escapar y escribir
-        $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
-        $csvWriter.WriteLine($line)
+      param([psobject]$Row)
+      if ($null -eq $csvWriter) { return }
+      $vals = foreach ($c in $columns) {
+        if ($Row.PSObject.Properties.Name -contains $c) { $Row.$c } else { $null }
+      }
+      $line = ($vals | ForEach-Object { Escape-CsvValue $_ }) -join ','
+      $csvWriter.WriteLine($line)
     }
-}
 
     # --- Preparar CSV incremental ---
     if ($OutCsv) {
@@ -221,9 +211,7 @@ $core = {
           Get-ChildItem -LiteralPath $d.FullName -Force -Recurse -ErrorAction Stop |
             ForEach-Object {
               $totalItems++
-              if (-not $_.PSIsContainer) {
-                $totalSize += [int64]$_.Length
-              }
+              if (-not $_.PSIsContainer) { $totalSize += [int64]$_.Length }
             }
         }
         catch {
