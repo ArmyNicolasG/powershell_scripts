@@ -82,17 +82,37 @@ function Mask-Sas {
 function Parse-SasWindow {
   param([string]$sas)
   if (-not $sas) { return $null }
+
   $q = $sas.TrimStart('?')
   $map = @{}
   foreach ($kv in $q -split '&') {
     $parts = $kv -split '=',2
     if ($parts.Count -eq 2) { $map[$parts[0]] = [System.Uri]::UnescapeDataString($parts[1]) }
   }
-  $st = $null; $se = $null
-  if ($map['st']) { [void][datetime]::TryParse($map['st'], [Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$st) }
-  if ($map['se']) { [void][datetime]::TryParse($map['se'], [Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$se) }
-  [pscustomobject]@{ StartUtc = $st; ExpiryUtc = $se; Services = $map['ss']; Types=$map['srt']; Perms=$map['sp'] }
+
+  $stUtc = $null; $seUtc = $null
+
+  if ($map['st']) {
+    try {
+      # SAS normalmente viene en ISO 8601 (ej: 2025-10-01T13:45:19Z)
+      $stUtc = ([datetimeoffset]::Parse($map['st'], [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime
+    } catch { $stUtc = $null }
+  }
+  if ($map['se']) {
+    try {
+      $seUtc = ([datetimeoffset]::Parse($map['se'], [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime
+    } catch { $seUtc = $null }
+  }
+
+  [pscustomobject]@{
+    StartUtc = $stUtc
+    ExpiryUtc = $seUtc
+    Services = $map['ss']
+    Types    = $map['srt']
+    Perms    = $map['sp']
+  }
 }
+
 
 function Write-Section { param([string]$title) Write-Host "`n=== $title ===" -ForegroundColor Cyan }
 
@@ -173,18 +193,22 @@ function Test-AzCopyAuth {
   param([string]$Az, [string]$UrlReal, [string]$UrlMask)
   Write-Section "Test de autenticación (azcopy ls)"
   Write-Host ("Probar destino: {0}" -f $UrlMask)
-  & "$Az" ls "$UrlReal" --recursive=false 2>&1 | Tee-Object -Variable lsOut | Out-Host
+
+  # 'ls' sin flags para máxima compatibilidad
+  & "$Az" ls "$UrlReal" 2>&1 | Tee-Object -Variable lsOut | Out-Host
   $code = $LASTEXITCODE
+
   if ($code -ne 0) {
     if ($lsOut -match 'AuthenticationFailed') {
-      throw "Auth FAILED. Revisa: reloj del servidor (w32tm /resync) y SAS (ss=f, srt=sco, sp=rwdlacupx, st en el pasado, spr=https)."
+      throw "Auth FAILED. Revisa reloj y SAS (ss=f, srt=sco, sp=rwdlacupx, st en el pasado, spr=https)."
     } else {
-      throw "azcopy ls falló con código $code. Arriba está el mensaje de error."
+      throw "azcopy ls falló con código $code. Mensaje arriba."
     }
   } else {
     Write-Host "Auth OK ✅"
   }
 }
+
 Test-AzCopyAuth -Az $azcopy -UrlReal $destUrl -UrlMask $destMasked
 
 # ---------- ejecución AzCopy ----------
