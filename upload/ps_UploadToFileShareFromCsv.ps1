@@ -1,80 +1,29 @@
 <#
 .SYNOPSIS
   Migra archivos/carpetas a Azure File Share preservando ACLs NTFS.
-  Puede copiar todo el árbol (más eficiente) o solo las rutas listadas en un CSV.
-
-.PARAMETER SourceRoot
-  Carpeta raíz local o UNC del origen (ej. D:\Datos o \\FS01\Compartido\Area).
-
-.PARAMETER CsvStructurePath
-  (Opcional) CSV salido de ps_GetFilesParameters.ps1. Si se usa -FromCsvOnly, filtra qué copiar.
-
-.PARAMETER StorageAccount
-  Nombre de la Storage Account de Azure (sin FQDN).
-
-.PARAMETER ShareName
-  Nombre del Azure File Share de destino.
-
-.PARAMETER DestSubPath
-  (Opcional) Subcarpeta en el share (ej. Proyectos2025). Si no se da, copia a la raíz del share.
-
-.PARAMETER Sas
-  (Opcional) SAS del share (recomendado). Formato ?sv=...; no incluyas la URL.
-
-.PARAMETER AccountKey
-  (Opcional) Clave de la Storage Account. Úsala si no pasas SAS.
-
-.PARAMETER FromCsvOnly
-  Si se especifica, copia únicamente las rutas que aparezcan en el CSV (archivos y/o carpetas).
-
-.PARAMETER BatchSize
-  Cantidad de rutas a incluir por lote cuando se usa -FromCsvOnly (por defecto 2000).
-
-.PARAMETER PreservePermissions
-  Por defecto $true. Controla --preserve-smb-permissions/--preserve-smb-info.
-
-.PARAMETER LogDir
-  Carpeta para logs de AzCopy y journal. Por defecto .\logs\{fecha-hora}.
+  Copia todo el árbol o solo rutas listadas en un CSV (por lotes) con trazabilidad.
 
 .PARAMETER AzCopyPath
-  (Opcional) Ruta absoluta a azcopy.exe. Si no se especifica, se buscará en PATH.
-
-.EXAMPLE
-  .\Invoke-AzureFilesMigration.ps1 `
-    -SourceRoot "D:\Datos" `
-    -StorageAccount "contosofiles01" -ShareName "proyectos" `
-    -Sas "?sv=2024-08-04&ss=f&srt=sco&sp=rwdlcx..." `
-    -AzCopyPath "C:\Tools\azcopy\azcopy.exe" `
-    -LogDir "D:\MigraLogs"
-
-.EXAMPLE
-  # Copiar solo lo que está listado en el CSV
-  .\Invoke-AzureFilesMigration.ps1 `
-    -SourceRoot "\\FS01\Compartido\Contabilidad" `
-    -CsvStructurePath "C:\out\estructura.csv" -FromCsvOnly `
-    -StorageAccount "contosofiles01" -ShareName "proyectos" -Sas "?sv=..."
+  Ruta absoluta a azcopy.exe. Si no se especifica, se busca en PATH.
 #>
 
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)] [string] $SourceRoot,
-  [Parameter(Mandatory=$false)] [string] $CsvStructurePath,
+  [string] $CsvStructurePath,
   [Parameter(Mandatory=$true)] [string] $StorageAccount,
   [Parameter(Mandatory=$true)] [string] $ShareName,
-  [Parameter(Mandatory=$false)] [string] $DestSubPath,
-  [Parameter(Mandatory=$false)] [string] $Sas,
-  [Parameter(Mandatory=$false)] [string] $AccountKey,
+  [string] $DestSubPath,
+  [string] $Sas,
+  [string] $AccountKey,
   [switch] $FromCsvOnly,
   [int] $BatchSize = 2000,
   [bool] $PreservePermissions = $true,
   [string] $LogDir = $(Join-Path -Path (Join-Path -Path (Get-Location) -ChildPath "logs") -ChildPath (Get-Date -Format "yyyyMMdd-HHmmss")),
-  [string] $AzCopyPath   # <-- NUEVO
+  [string] $AzCopyPath
 )
 
-# --- Validaciones ------------------------------------------------------------
-if (!(Test-Path -LiteralPath $SourceRoot)) { throw "SourceRoot no existe: $SourceRoot" }
-
-# Resolver ruta de azcopy.exe (usar parámetro si viene)
+# ---------- utilidades ----------
 function Resolve-AzCopyPath {
   param([string]$PathHint)
   if ($PathHint) {
@@ -85,38 +34,50 @@ function Resolve-AzCopyPath {
   if ($cmd) { return $cmd.Source }
   return $null
 }
+function Mask-Sas {
+  param([string]$url)
+  if (-not $url) { return $null }
+  # enmascara 'sig=' y recorta un poco los otros parámetros
+  $masked = $url -replace '(sig=)[^&]+', '${1}***'
+  $masked = $masked -replace '(se=)[^&]+','${1}***'
+  $masked = $masked -replace '(st=)[^&]+','${1}***'
+  return $masked
+}
+function Write-Section { param([string]$title) Write-Host "`n=== $title ===" -ForegroundColor Cyan }
 
+# ---------- validaciones básicas ----------
+if (!(Test-Path -LiteralPath $SourceRoot)) { throw "SourceRoot no existe o no es accesible: $SourceRoot" }
 $azcopy = Resolve-AzCopyPath -PathHint $AzCopyPath
 if (-not $azcopy) { throw "AzCopy no está instalado/en PATH. Pasa -AzCopyPath con la ruta a azcopy.exe (v10+)." }
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+$runIdDir = Join-Path $LogDir ("run-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory -Path $runIdDir -Force | Out-Null
+$stdOutPath = Join-Path $runIdDir 'azcopy-stdout.log'
+$stdErrPath = Join-Path $runIdDir 'azcopy-stderr.log'
 
-# Construir URL destino
+# ---------- construir destino ----------
 $baseUrl = "https://$StorageAccount.file.core.windows.net/$ShareName"
 if ($DestSubPath) { 
   $DestSubPath = $DestSubPath.Trim('\','/')
   $baseUrl = "$baseUrl/$DestSubPath"
 }
+$destUrl  = if ($Sas) { "$baseUrl$Sas" } else { $baseUrl }
+$destUrlMasked = if ($Sas) { Mask-Sas $destUrl } else { $destUrl }
 
-# Autenticación
-$env:AZCOPY_LOG_LOCATION = $LogDir
-$env:AZCOPY_JOB_PLAN_LOCATION = $LogDir
-$env:AZCOPY_CONCURRENCY_VALUE = "AUTO"  # AzCopy decide; puedes fijar p.ej. 32
+# ---------- preparar entorno AzCopy ----------
+$env:AZCOPY_LOG_LOCATION      = $runIdDir
+$env:AZCOPY_JOB_PLAN_LOCATION = $runIdDir
+$env:AZCOPY_CONCURRENCY_VALUE = "AUTO"
+if ($AccountKey -and -not $Sas) { $env:AZCOPY_ACCOUNT_KEY = $AccountKey }
 
-if ($AccountKey -and -not $Sas) {
-  # Con Account Key
-  $env:AZCOPY_ACCOUNT_KEY = $AccountKey
-}
-
-# Parámetros comunes AzCopy
+# ---------- args comunes ----------
 $permArgs = @()
 if ($PreservePermissions) {
   $permArgs += "--preserve-smb-permissions=true"
   $permArgs += "--preserve-smb-info=true"
-  # Permite copiar archivos con atributos de sistema/ocultos/backup
   $permArgs += "--backup"
 }
-
 $commonArgs = @(
   "--recursive=true",
   "--overwrite=ifSourceNewer",
@@ -124,77 +85,111 @@ $commonArgs = @(
   "--output-level=Essential"
 ) + $permArgs
 
-# Destino final (SAS o no)
-$destUrl = if ($Sas) { "$baseUrl$Sas" } else { $baseUrl }
+# ---------- pre-flight ----------
+Write-Section "Pre-flight"
+try { 
+  $ver = & "$azcopy" --version 2>$null
+  Write-Host ("AzCopy: {0}" -f ($ver -join ' ')) 
+} catch { Write-Host "AzCopy: (no se pudo leer versión)" }
+Write-Host ("Ejecutable : {0}" -f $azcopy)
+Write-Host ("Origen     : {0}" -f $SourceRoot)
+Write-Host ("Destino    : {0}" -f $destUrlMasked)
+Write-Host ("Share      : {0}/{1}" -f $StorageAccount, $ShareName)
+Write-Host ("Subcarpeta : {0}" -f ($DestSubPath ? $DestSubPath : '/'))
+Write-Host ("Permisos   : {0}" -f ($PreservePermissions ? 'preserve SMB perms + info + backup' : 'NO preservar permisos'))
+Write-Host ("LogDir     : {0}" -f $runIdDir)
 
-# --- Modo 1: Copiar todo el árbol (más eficiente) ----------------------------
-function Start-FullTreeCopy {
-  Write-Host "[AzCopy] Copiando TODO el árbol desde $SourceRoot -> $destUrl"
-  & "$azcopy" copy $SourceRoot $destUrl @commonArgs
-  if ($LASTEXITCODE -ne 0) { throw "AzCopy retornó código $LASTEXITCODE" }
+# ---------- funciones de copia ----------
+function Invoke-AzCopy {
+  param([string[]]$ArgsToUse)
+  $cmdMasked = @("`"$azcopy`"", 'copy', "`"$SourceRoot`"", "`"$destUrlMasked`"") + $ArgsToUse
+  Write-Section "Comando AzCopy (SAS enmascarado)"
+  Write-Host ($cmdMasked -join ' ')
+
+  Write-Section "Ejecución"
+  # Ejecutar, capturando stdout/stderr
+  & "$azcopy" copy "$SourceRoot" "$destUrl" @ArgsToUse 2> "$stdErrPath" | Tee-Object -FilePath "$stdOutPath"
+  $exit = $LASTEXITCODE
+  Write-Host "`nExitCode: $exit  (stdout: $stdOutPath  / stderr: $stdErrPath)"
+
+  # Intentar hallar el log interno de AzCopy y mostrar tail si hubo error
+  $azLog = Select-String -Path $stdOutPath -Pattern 'Log file is located at:\s*(.*)$' | Select-Object -Last 1
+  if ($azLog) {
+    $logPath = $azLog.Matches[0].Groups[1].Value.Trim()
+    Write-Host "AzCopy log: $logPath"
+    if ($exit -ne 0 -and (Test-Path -LiteralPath $logPath)) {
+      Write-Section "Últimas 60 líneas del log de AzCopy"
+      Get-Content -LiteralPath $logPath -Tail 60
+    }
+  } else {
+    Write-Host "No se detectó ruta del log interno en stdout."
+  }
+
+  if ($exit -ne 0) { throw "AzCopy retornó código $exit" }
 }
 
-# --- Modo 2: Copiar sólo rutas del CSV (batches) ----------------------------
+function Start-FullTreeCopy {
+  Write-Section "Copia completa"
+  Invoke-AzCopy -ArgsToUse $commonArgs
+}
+
 function Start-CsvSelectiveCopy {
   if (-not (Test-Path -LiteralPath $CsvStructurePath)) { throw "CSV no encontrado: $CsvStructurePath" }
-
-  Write-Host "[AzCopy] Cargando CSV de estructura: $CsvStructurePath"
+  Write-Section "CSV selectivo"
+  Write-Host "[Cargando] $CsvStructurePath"
   $rows = Import-Csv -LiteralPath $CsvStructurePath
+  if (-not $rows -or $rows.Count -eq 0) { Write-Warning "CSV vacío: $CsvStructurePath"; return }
 
-  # Las columnas pueden variar. Intentamos detectar columna de ruta:
   $candidateCols = @('FilePath','Path','Ruta','FullName','FolderPath')
-  $col = $candidateCols | Where-Object { $_ -in $rows[0].PSObject.Properties.Name }
-  if (-not $col) { throw "No se detectó columna de ruta en CSV. Esperaba una de: $($candidateCols -join ', ')" }
+  $first = $rows[0]
+  $col = $candidateCols | Where-Object { $_ -in $first.PSObject.Properties.Name }
+  if (-not $col) { throw "No se detectó columna de ruta en CSV. Esperaba: $($candidateCols -join ', ')" }
   $col = $col[0]
 
-  # Normalizar a rutas relativas respecto a SourceRoot
+  # Normalizar a rutas relativas
   $allPaths = foreach ($r in $rows) {
-    $p = $r.$col
-    if ([string]::IsNullOrWhiteSpace($p)) { continue }
-    # Convertir slash invertido duplicado, etc.
+    $p = $r.$col; if ([string]::IsNullOrWhiteSpace($p)) { continue }
     $p = $p -replace '[\\/]+','\'
     if ($p.StartsWith($SourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
       $rel = $p.Substring($SourceRoot.Length).TrimStart('\','/')
       if ($rel) { $rel }
     }
   }
-
-  # Limpiar duplicados y dividir en lotes
   $relPaths = $allPaths | Sort-Object -Unique
   if (-not $relPaths) { Write-Warning "El CSV no contiene rutas bajo $SourceRoot"; return }
 
-  # AzCopy puede incluir varias rutas con --include-path separadas por ';'
+  # Batching
   $batches = [System.Collections.Generic.List[Object]]::new()
-  $current = New-Object System.Collections.Generic.List[String]
+  $current = New-Object System.Collections.Generic.List[string]
   foreach ($item in $relPaths) {
     $current.Add($item)
-    if ($current.Count -ge $BatchSize) {
-      $batches.Add($current)
-      $current = New-Object System.Collections.Generic.List[String]
-    }
+    if ($current.Count -ge $BatchSize) { $batches.Add($current); $current = New-Object System.Collections.Generic.List[string] }
   }
   if ($current.Count -gt 0) { $batches.Add($current) }
+
+  Write-Host ("Rutas únicas: {0} | Tamaño lote: {1} | Nº de lotes: {2}" -f $relPaths.Count, $BatchSize, $batches.Count)
 
   $i = 0
   foreach ($batch in $batches) {
     $i++
     $inc = ($batch -join ';')
-    Write-Host "[AzCopy] Lote $i/$($batches.Count) - Rutas: $($batch.Count)"
-    & "$azcopy" copy $SourceRoot $destUrl @commonArgs --include-path="$inc"
-    if ($LASTEXITCODE -ne 0) { throw "AzCopy (lote $i) retornó código $LASTEXITCODE" }
+    Write-Section ("Lote {0}/{1} — Rutas: {2}" -f $i, $batches.Count, $batch.Count)
+    Invoke-AzCopy -ArgsToUse ($commonArgs + "--include-path=$inc")
   }
 }
 
-# --- Ejecución ---------------------------------------------------------------
+# ---------- ejecución ----------
 try {
   if ($FromCsvOnly) { Start-CsvSelectiveCopy } else { Start-FullTreeCopy }
-  Write-Host "`n[OK] Migración completada. Logs: $LogDir"
+  Write-Section "OK"
+  Write-Host "Migración completada. Carpeta de ejecución/logs: $runIdDir"
 }
 catch {
+  Write-Section "ERROR"
   Write-Error $_.Exception.Message
+  Write-Host "Revisa: $stdOutPath  y  $stdErrPath  (y el log interno que se imprimió arriba)."
   throw
 }
 finally {
-  # Limpieza sensible de credenciales en variables de entorno
   if ($env:AZCOPY_ACCOUNT_KEY) { Remove-Item Env:\AZCOPY_ACCOUNT_KEY -ErrorAction SilentlyContinue }
 }
