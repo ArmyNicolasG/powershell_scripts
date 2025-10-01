@@ -1,10 +1,46 @@
 <#
 .SYNOPSIS
   Migra archivos/carpetas a Azure File Share preservando ACLs NTFS.
-  Copia todo el árbol o solo rutas listadas en un CSV (por lotes) con trazabilidad.
+  Copia todo el árbol o solo rutas del CSV (por lotes) con trazabilidad.
+
+.PARAMETER SourceRoot
+  Raíz local o UNC (D:\Datos o \\FS01\Share\Area)
+
+.PARAMETER CsvStructurePath
+  CSV para copia selectiva (si se usa -FromCsvOnly)
+
+.PARAMETER StorageAccount
+  Nombre de la cuenta (sin FQDN)
+
+.PARAMETER ShareName
+  Nombre del Azure File Share
+
+.PARAMETER DestSubPath
+  Subcarpeta en el share (opcional)
+
+.PARAMETER Sas
+  SAS del destino (incluye ?sv=...)
+
+.PARAMETER AccountKey
+  Clave de la Storage Account (si no usas SAS)
+
+.PARAMETER FromCsvOnly
+  Copia solo las rutas del CSV
+
+.PARAMETER BatchSize
+  Nº de rutas por lote (include-path)
+
+.PARAMETER PreservePermissions
+  Activa --preserve-smb-permissions/--preserve-smb-info y --backup
+
+.PARAMETER LogDir
+  Carpeta base de logs (se crea subcarpeta por corrida)
 
 .PARAMETER AzCopyPath
-  Ruta absoluta a azcopy.exe. Si no se especifica, se busca en PATH.
+  Ruta a azcopy.exe (si no está en PATH)
+
+.PARAMETER OverwriteMode
+  IfSourceNewer (default) | True | False | Prompt
 #>
 
 [CmdletBinding()]
@@ -20,7 +56,9 @@ param(
   [int] $BatchSize = 2000,
   [bool] $PreservePermissions = $true,
   [string] $LogDir = $(Join-Path -Path (Join-Path -Path (Get-Location) -ChildPath "logs") -ChildPath (Get-Date -Format "yyyyMMdd-HHmmss")),
-  [string] $AzCopyPath
+  [string] $AzCopyPath,
+  [ValidateSet('IfSourceNewer','True','False','Prompt')]
+  [string] $OverwriteMode = 'IfSourceNewer'
 )
 
 # ---------- utilidades ----------
@@ -34,27 +72,40 @@ function Resolve-AzCopyPath {
   if ($cmd) { return $cmd.Source }
   return $null
 }
+
 function Mask-Sas {
   param([string]$url)
   if (-not $url) { return $null }
-  # enmascara 'sig=' y recorta un poco los otros parámetros
-  $masked = $url -replace '(sig=)[^&]+', '${1}***'
-  $masked = $masked -replace '(se=)[^&]+','${1}***'
-  $masked = $masked -replace '(st=)[^&]+','${1}***'
-  return $masked
+  ($url -replace '(sig=)[^&]+','${1}***' -replace '(se=)[^&]+','${1}***' -replace '(st=)[^&]+','${1}***')
 }
+
+function Parse-SasWindow {
+  param([string]$sas)
+  if (-not $sas) { return $null }
+  $q = $sas.TrimStart('?')
+  $map = @{}
+  foreach ($kv in $q -split '&') {
+    $parts = $kv -split '=',2
+    if ($parts.Count -eq 2) { $map[$parts[0]] = [System.Uri]::UnescapeDataString($parts[1]) }
+  }
+  $st = $null; $se = $null
+  if ($map['st']) { [void][datetime]::TryParse($map['st'], [Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$st) }
+  if ($map['se']) { [void][datetime]::TryParse($map['se'], [Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$se) }
+  [pscustomobject]@{ StartUtc = $st; ExpiryUtc = $se; Services = $map['ss']; Types=$map['srt']; Perms=$map['sp'] }
+}
+
 function Write-Section { param([string]$title) Write-Host "`n=== $title ===" -ForegroundColor Cyan }
 
 # ---------- validaciones básicas ----------
 if (!(Test-Path -LiteralPath $SourceRoot)) { throw "SourceRoot no existe o no es accesible: $SourceRoot" }
 $azcopy = Resolve-AzCopyPath -PathHint $AzCopyPath
-if (-not $azcopy) { throw "AzCopy no está instalado/en PATH. Pasa -AzCopyPath con la ruta a azcopy.exe (v10+)." }
+if (-not $azcopy) { throw "AzCopy no está disponible. Pasa -AzCopyPath con la ruta a azcopy.exe (v10+)." }
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-$runIdDir = Join-Path $LogDir ("run-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-New-Item -ItemType Directory -Path $runIdDir -Force | Out-Null
-$stdOutPath = Join-Path $runIdDir 'azcopy-stdout.log'
-$stdErrPath = Join-Path $runIdDir 'azcopy-stderr.log'
+$runDir = Join-Path $LogDir ("run-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+$stdOutPath = Join-Path $runDir 'azcopy-stdout.log'
+$stdErrPath = Join-Path $runDir 'azcopy-stderr.log'
 
 # ---------- construir destino ----------
 $baseUrl = "https://$StorageAccount.file.core.windows.net/$ShareName"
@@ -62,57 +113,92 @@ if ($DestSubPath) {
   $DestSubPath = $DestSubPath.Trim('\','/')
   $baseUrl = "$baseUrl/$DestSubPath"
 }
-$destUrl  = if ($Sas) { "$baseUrl$Sas" } else { $baseUrl }
-$destUrlMasked = if ($Sas) { Mask-Sas $destUrl } else { $destUrl }
+$destUrl = if ($Sas) { "$baseUrl$Sas" } else { $baseUrl }
+$destMasked = if ($Sas) { Mask-Sas $destUrl } else { $destUrl }
 
-# ---------- preparar entorno AzCopy ----------
-$env:AZCOPY_LOG_LOCATION      = $runIdDir
-$env:AZCOPY_JOB_PLAN_LOCATION = $runIdDir
+# ---------- entorno AzCopy ----------
+$env:AZCOPY_LOG_LOCATION      = $runDir
+$env:AZCOPY_JOB_PLAN_LOCATION = $runDir
 $env:AZCOPY_CONCURRENCY_VALUE = "AUTO"
 if ($AccountKey -and -not $Sas) { $env:AZCOPY_ACCOUNT_KEY = $AccountKey }
 
 # ---------- args comunes ----------
 $permArgs = @()
-if ($PreservePermissions) {
-  $permArgs += "--preserve-smb-permissions=true"
-  $permArgs += "--preserve-smb-info=true"
-  $permArgs += "--backup"
+if ($PreservePermissions) { $permArgs += "--preserve-smb-permissions=true"; $permArgs += "--preserve-smb-info=true"; $permArgs += "--backup" }
+
+$ow = switch ($OverwriteMode) {
+  'True'          { 'true' }
+  'False'         { 'false' }
+  'Prompt'        { 'prompt' }
+  default         { 'ifSourceNewer' }
 }
+
 $commonArgs = @(
   "--recursive=true",
-  "--overwrite=ifSourceNewer",
+  "--overwrite=$ow",
   "--check-length=true",
   "--output-level=Essential"
 ) + $permArgs
 
 # ---------- pre-flight ----------
 Write-Section "Pre-flight"
-try { 
-  $ver = & "$azcopy" --version 2>$null
-  Write-Host ("AzCopy: {0}" -f ($ver -join ' ')) 
-} catch { Write-Host "AzCopy: (no se pudo leer versión)" }
+try { $ver = & "$azcopy" --version 2>$null; Write-Host ("AzCopy: {0}" -f ($ver -join ' ')) } catch { Write-Host "AzCopy: (no se pudo leer versión)" }
 Write-Host ("Ejecutable : {0}" -f $azcopy)
 Write-Host ("Origen     : {0}" -f $SourceRoot)
-Write-Host ("Destino    : {0}" -f $destUrlMasked)
-Write-Host ("Share      : {0}/{1}" -f $StorageAccount, $ShareName)
-Write-Host ("Subcarpeta : {0}" -f ($DestSubPath ? $DestSubPath : '/'))
+Write-Host ("Destino    : {0}" -f $destMasked)
+Write-Host ("Overwrite  : {0}" -f $OverwriteMode)
 Write-Host ("Permisos   : {0}" -f ($PreservePermissions ? 'preserve SMB perms + info + backup' : 'NO preservar permisos'))
-Write-Host ("LogDir     : {0}" -f $runIdDir)
+Write-Host ("Logs en    : {0}" -f $runDir)
 
-# ---------- funciones de copia ----------
+# Mostrar ventana del SAS y alertar por reloj
+if ($Sas) {
+  $sw = Parse-SasWindow -sas $Sas
+  if ($sw) {
+    $nowUtc = (Get-Date).ToUniversalTime()
+    Write-Host ("SAS: ss={0} srt={1} sp={2}" -f $sw.Services, $sw.Types, $sw.Perms)
+    Write-Host ("SAS Start (UTC):  {0:yyyy-MM-ddTHH:mm:ssZ}" -f $sw.StartUtc)
+    Write-Host ("SAS Expiry (UTC): {0:yyyy-MM-ddTHH:mm:ssZ}" -f $sw.ExpiryUtc)
+    Write-Host ("Now (UTC):        {0:yyyy-MM-ddTHH:mm:ssZ}" -f $nowUtc)
+    if ($sw.StartUtc -and $nowUtc -lt $sw.StartUtc.AddMinutes(-5)) {
+      Write-Warning "El SAS aún no está 'activo' según tu reloj local (st > ahora). Ajusta reloj o regenera SAS con 'st' en el pasado."
+    }
+    if ($sw.ExpiryUtc -and $nowUtc -gt $sw.ExpiryUtc) {
+      Write-Warning "El SAS está expirado."
+    }
+  }
+}
+
+# Test rápido de autenticación
+function Test-AzCopyAuth {
+  param([string]$Az, [string]$UrlReal, [string]$UrlMask)
+  Write-Section "Test de autenticación (azcopy ls)"
+  Write-Host ("Probar destino: {0}" -f $UrlMask)
+  & "$Az" ls "$UrlReal" --recursive=false 2>&1 | Tee-Object -Variable lsOut | Out-Host
+  $code = $LASTEXITCODE
+  if ($code -ne 0) {
+    if ($lsOut -match 'AuthenticationFailed') {
+      throw "Auth FAILED. Revisa: reloj del servidor (w32tm /resync) y SAS (ss=f, srt=sco, sp=rwdlacupx, st en el pasado, spr=https)."
+    } else {
+      throw "azcopy ls falló con código $code. Arriba está el mensaje de error."
+    }
+  } else {
+    Write-Host "Auth OK ✅"
+  }
+}
+Test-AzCopyAuth -Az $azcopy -UrlReal $destUrl -UrlMask $destMasked
+
+# ---------- ejecución AzCopy ----------
 function Invoke-AzCopy {
-  param([string[]]$ArgsToUse)
-  $cmdMasked = @("`"$azcopy`"", 'copy', "`"$SourceRoot`"", "`"$destUrlMasked`"") + $ArgsToUse
+  param([string[]]$ArgsToUse, [string]$Src, [string]$Dst, [string]$DstMask)
   Write-Section "Comando AzCopy (SAS enmascarado)"
+  $cmdMasked = @("`"$azcopy`"",'copy',"`"$Src`"", "`"$DstMask`"") + $ArgsToUse
   Write-Host ($cmdMasked -join ' ')
 
   Write-Section "Ejecución"
-  # Ejecutar, capturando stdout/stderr
-  & "$azcopy" copy "$SourceRoot" "$destUrl" @ArgsToUse 2> "$stdErrPath" | Tee-Object -FilePath "$stdOutPath"
+  & "$azcopy" copy "$Src" "$Dst" @ArgsToUse 2> "$stdErrPath" | Tee-Object -FilePath "$stdOutPath"
   $exit = $LASTEXITCODE
   Write-Host "`nExitCode: $exit  (stdout: $stdOutPath  / stderr: $stdErrPath)"
 
-  # Intentar hallar el log interno de AzCopy y mostrar tail si hubo error
   $azLog = Select-String -Path $stdOutPath -Pattern 'Log file is located at:\s*(.*)$' | Select-Object -Last 1
   if ($azLog) {
     $logPath = $azLog.Matches[0].Groups[1].Value.Trim()
@@ -121,18 +207,18 @@ function Invoke-AzCopy {
       Write-Section "Últimas 60 líneas del log de AzCopy"
       Get-Content -LiteralPath $logPath -Tail 60
     }
-  } else {
-    Write-Host "No se detectó ruta del log interno en stdout."
   }
 
   if ($exit -ne 0) { throw "AzCopy retornó código $exit" }
 }
 
+# --- Modo 1: Tree completo ---
 function Start-FullTreeCopy {
   Write-Section "Copia completa"
-  Invoke-AzCopy -ArgsToUse $commonArgs
+  Invoke-AzCopy -ArgsToUse $commonArgs -Src $SourceRoot -Dst $destUrl -DstMask $destMasked
 }
 
+# --- Modo 2: CSV selectivo ---
 function Start-CsvSelectiveCopy {
   if (-not (Test-Path -LiteralPath $CsvStructurePath)) { throw "CSV no encontrado: $CsvStructurePath" }
   Write-Section "CSV selectivo"
@@ -146,7 +232,6 @@ function Start-CsvSelectiveCopy {
   if (-not $col) { throw "No se detectó columna de ruta en CSV. Esperaba: $($candidateCols -join ', ')" }
   $col = $col[0]
 
-  # Normalizar a rutas relativas
   $allPaths = foreach ($r in $rows) {
     $p = $r.$col; if ([string]::IsNullOrWhiteSpace($p)) { continue }
     $p = $p -replace '[\\/]+','\'
@@ -155,10 +240,10 @@ function Start-CsvSelectiveCopy {
       if ($rel) { $rel }
     }
   }
+
   $relPaths = $allPaths | Sort-Object -Unique
   if (-not $relPaths) { Write-Warning "El CSV no contiene rutas bajo $SourceRoot"; return }
 
-  # Batching
   $batches = [System.Collections.Generic.List[Object]]::new()
   $current = New-Object System.Collections.Generic.List[string]
   foreach ($item in $relPaths) {
@@ -174,20 +259,20 @@ function Start-CsvSelectiveCopy {
     $i++
     $inc = ($batch -join ';')
     Write-Section ("Lote {0}/{1} — Rutas: {2}" -f $i, $batches.Count, $batch.Count)
-    Invoke-AzCopy -ArgsToUse ($commonArgs + "--include-path=$inc")
+    Invoke-AzCopy -ArgsToUse ($commonArgs + "--include-path=$inc") -Src $SourceRoot -Dst $destUrl -DstMask $destMasked
   }
 }
 
-# ---------- ejecución ----------
+# ---------- run ----------
 try {
   if ($FromCsvOnly) { Start-CsvSelectiveCopy } else { Start-FullTreeCopy }
   Write-Section "OK"
-  Write-Host "Migración completada. Carpeta de ejecución/logs: $runIdDir"
+  Write-Host "Migración completada. Logs: $runDir"
 }
 catch {
   Write-Section "ERROR"
   Write-Error $_.Exception.Message
-  Write-Host "Revisa: $stdOutPath  y  $stdErrPath  (y el log interno que se imprimió arriba)."
+  Write-Host "Revisa: $stdOutPath  y  $stdErrPath."
   throw
 }
 finally {
