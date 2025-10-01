@@ -118,7 +118,6 @@ if ($PreservePermissions) {
 }
 
 $commonArgs = @(
-  "--from-to=LocalAzureFile",
   "--recursive=true",
   "--overwrite=ifSourceNewer",
   "--check-length=true",
