@@ -195,7 +195,6 @@ function Test-AzCopyAuth {
   Write-Host ("Probar destino: {0}" -f $UrlMask)
 
   # 'ls' sin flags para máxima compatibilidad
-  & "$Az" ls "$UrlReal" 2>&1 | Tee-Object -Variable lsOut | Out-Host
   $code = $LASTEXITCODE
 
   if ($code -ne 0) {
