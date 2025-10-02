@@ -1,0 +1,25 @@
+
+Job 609b88ac-1262-c148-724b-909e5d49f09d has started
+Log file is located at: D:\proyectos-eddier\intervial\scripts\upload\logs\20251002-094435\run-20251002-094435\609b88ac-1262-c148-724b-909e5d49f09d.log
+
+
+
+
+Job 609b88ac-1262-c148-724b-909e5d49f09d summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 2
+Number of Folder Property Transfers: 2
+Number of Symlink Transfers: 0
+Total Number of Transfers: 4
+Number of File Transfers Completed: 2
+Number of Folder Transfers Completed: 2
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 11974
+Final Job Status: Completed
+

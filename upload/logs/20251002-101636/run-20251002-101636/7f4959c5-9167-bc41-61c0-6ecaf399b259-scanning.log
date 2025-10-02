@@ -1,0 +1,21 @@
+2025/10/02 15:16:38 AzcopyVersion  10.30.1
+2025/10/02 15:16:38 OS-Environment  windows
+2025/10/02 15:16:38 OS-Architecture  amd64
+2025/10/02 15:16:38 Log times are in UTC. Local time is 2 Oct 2025 10:16:38
+2025/10/02 15:16:38 ==> REQUEST/RESPONSE (Try=1/94.3884ms, OpTime=620.3927ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   HEAD https://eduardlab01.file.core.windows.net/eduardlabfs/holitas%2Fanidado?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [137996f8-f01a-006d-3aaf-33962e000000]
+
+2025/10/02 15:16:38 ==> REQUEST/RESPONSE (Try=1/93.5225ms, OpTime=93.5225ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/holitas%2Fanidado?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [137996fe-f01a-006d-3baf-33962e000000]
+
+2025/10/02 15:16:38 ==> REQUEST/RESPONSE (Try=1/97.195ms, OpTime=97.195ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/holitas%2Fanidado?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [137996ff-f01a-006d-3caf-33962e000000]
+
+2025/10/02 15:16:39 ==> REQUEST/RESPONSE (Try=1/99.38ms, OpTime=99.38ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/holitas%2Fanidado?comp=list&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [13799700-f01a-006d-3daf-33962e000000]
+
+2025/10/02 15:16:39 Closing Log

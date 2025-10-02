@@ -1,0 +1,9 @@
+2025/10/02 14:44:40 AzcopyVersion  10.30.1
+2025/10/02 14:44:40 OS-Environment  windows
+2025/10/02 14:44:40 OS-Architecture  amd64
+2025/10/02 14:44:40 Log times are in UTC. Local time is 2 Oct 2025 09:44:40
+2025/10/02 14:44:40 ==> REQUEST/RESPONSE (Try=1/98.6615ms, OpTime=397.328ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs?comp=list&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [b007b84c-501a-004b-6fab-33de36000000]
+
+2025/10/02 14:44:42 Closing Log

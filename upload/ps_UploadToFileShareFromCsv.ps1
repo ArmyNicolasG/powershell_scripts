@@ -144,7 +144,7 @@ if ($AccountKey -and -not $Sas) { $env:AZCOPY_ACCOUNT_KEY = $AccountKey }
 
 # ---------- args comunes ----------
 $permArgs = @()
-if ($PreservePermissions) { $permArgs += "--preserve-smb-permissions=true"; $permArgs += "--preserve-smb-info=true"; $permArgs += "--backup" }
+if ($PreservePermissions) { $permArgs += "--preserve-smb-permissions=true"; $permArgs += "--preserve-smb-info=true"; $permArgs }
 
 $ow = switch ($OverwriteMode) {
   'True'          { 'true' }

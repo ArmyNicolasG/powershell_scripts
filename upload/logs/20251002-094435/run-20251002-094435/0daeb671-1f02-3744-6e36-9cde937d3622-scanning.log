@@ -1,0 +1,17 @@
+2025/10/02 14:44:37 AzcopyVersion  10.30.1
+2025/10/02 14:44:37 OS-Environment  windows
+2025/10/02 14:44:37 OS-Architecture  amd64
+2025/10/02 14:44:37 Log times are in UTC. Local time is 2 Oct 2025 09:44:37
+2025/10/02 14:44:38 ==> REQUEST/RESPONSE (Try=1/96.5743ms, OpTime=1.3705965s) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [7424b5ee-701a-0001-3cab-337db9000000]
+
+2025/10/02 14:44:38 ==> REQUEST/RESPONSE (Try=1/99.0399ms, OpTime=99.0399ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [7424b5f1-701a-0001-3dab-337db9000000]
+
+2025/10/02 14:44:38 ==> REQUEST/RESPONSE (Try=1/90.2315ms, OpTime=90.8138ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/?comp=list&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [7424b5f2-701a-0001-3eab-337db9000000]
+
+2025/10/02 14:44:38 Closing Log

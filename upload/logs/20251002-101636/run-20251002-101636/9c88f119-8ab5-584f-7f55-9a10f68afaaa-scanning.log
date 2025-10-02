@@ -1,0 +1,9 @@
+2025/10/02 15:16:40 AzcopyVersion  10.30.1
+2025/10/02 15:16:40 OS-Environment  windows
+2025/10/02 15:16:40 OS-Architecture  amd64
+2025/10/02 15:16:40 Log times are in UTC. Local time is 2 Oct 2025 10:16:40
+2025/10/02 15:16:41 ==> REQUEST/RESPONSE (Try=1/100.3223ms, OpTime=390.7566ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/holitas%2Fanidado?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [69cf11f6-c01a-0049-05af-33608e000000]
+
+2025/10/02 15:16:43 Closing Log

@@ -1,0 +1,73 @@
+2025/10/02 14:37:07 AzcopyVersion  10.30.1
+2025/10/02 14:37:07 OS-Environment  windows
+2025/10/02 14:37:07 OS-Architecture  amd64
+2025/10/02 14:37:07 Log times are in UTC. Local time is 2 Oct 2025 09:37:07
+2025/10/02 14:37:08 ==> REQUEST/RESPONSE (Try=1/96.1308ms, OpTime=586.5584ms) -- RESPONSE STATUS CODE ERROR
+   HEAD https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita
+   Accept: application/xml
+   User-Agent: AzCopy/10.30.1 azsdk-go-azfile/v1.5.1-beta.2 (go1.24.6; Windows_NT)
+   X-Ms-Client-Request-Id: 6dd31adb-5fa0-46b3-703b-1025dd0fb35f
+   x-ms-allow-trailing-dot: true
+   x-ms-version: 2025-05-05
+   --------------------------------------------------------------------------------
+   RESPONSE Status: 401 Server failed to authenticate the request. Please refer to the information in the www-authenticate header.
+   Date: Thu, 02 Oct 2025 14:37:07 GMT
+   Server: Windows-Azure-File/1.0 Microsoft-HTTPAPI/2.0
+   Www-Authenticate: Bearer authorization_uri=https://login.microsoftonline.com/920040b3-c220-48a2-a73f-1177fa2c098e/oauth2/authorize resource_id=https://storage.azure.com
+   X-Ms-Client-Request-Id: 6dd31adb-5fa0-46b3-703b-1025dd0fb35f
+   X-Ms-Error-Code: NoAuthenticationInformation
+   X-Ms-Request-Id: 7a681700-001a-0069-2baa-331b29000000
+   X-Ms-Version: 2025-05-05
+Response Details: 
+
+2025/10/02 14:37:08 ==> REQUEST/RESPONSE (Try=1/91.264ms, OpTime=91.264ms) -- RESPONSE STATUS CODE ERROR
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita?restype=directory
+   Accept: application/xml
+   User-Agent: AzCopy/10.30.1 azsdk-go-azfile/v1.5.1-beta.2 (go1.24.6; Windows_NT)
+   X-Ms-Client-Request-Id: ce097dd0-107d-4ef1-4610-1583d1dd1387
+   x-ms-allow-trailing-dot: true
+   x-ms-version: 2025-05-05
+   --------------------------------------------------------------------------------
+   RESPONSE Status: 401 Server failed to authenticate the request. Please refer to the information in the www-authenticate header.
+   Content-Length: 302
+   Content-Type: application/xml
+   Date: Thu, 02 Oct 2025 14:37:07 GMT
+   Server: Windows-Azure-File/1.0 Microsoft-HTTPAPI/2.0
+   Www-Authenticate: Bearer authorization_uri=https://login.microsoftonline.com/920040b3-c220-48a2-a73f-1177fa2c098e/oauth2/authorize resource_id=https://storage.azure.com
+   X-Ms-Client-Request-Id: ce097dd0-107d-4ef1-4610-1583d1dd1387
+   X-Ms-Error-Code: NoAuthenticationInformation
+   X-Ms-Request-Id: 7a681706-001a-0069-2daa-331b29000000
+   X-Ms-Version: 2025-05-05
+Response Details: ﻿<Code>NoAuthenticationInformation</Code><Message>Server failed to authenticate the request. Please refer to the information in the www-authenticate header. </Message>
+
+2025/10/02 14:37:08 ==> REQUEST/RESPONSE (Try=1/89.4274ms, OpTime=89.4274ms) -- RESPONSE STATUS CODE ERROR
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita?comp=list&restype=directory
+   Accept: application/xml
+   User-Agent: AzCopy/10.30.1 azsdk-go-azfile/v1.5.1-beta.2 (go1.24.6; Windows_NT)
+   X-Ms-Client-Request-Id: 22dfdb18-e055-489a-4c31-fef8e0b6dd67
+   x-ms-allow-trailing-dot: true
+   x-ms-version: 2025-05-05
+   --------------------------------------------------------------------------------
+   RESPONSE Status: 401 Server failed to authenticate the request. Please refer to the information in the www-authenticate header.
+   Content-Length: 302
+   Content-Type: application/xml
+   Date: Thu, 02 Oct 2025 14:37:07 GMT
+   Server: Windows-Azure-File/1.0 Microsoft-HTTPAPI/2.0
+   Www-Authenticate: Bearer authorization_uri=https://login.microsoftonline.com/920040b3-c220-48a2-a73f-1177fa2c098e/oauth2/authorize resource_id=https://storage.azure.com
+   X-Ms-Client-Request-Id: 22dfdb18-e055-489a-4c31-fef8e0b6dd67
+   X-Ms-Error-Code: NoAuthenticationInformation
+   X-Ms-Request-Id: 7a681707-001a-0069-2eaa-331b29000000
+   X-Ms-Version: 2025-05-05
+Response Details: ﻿<Code>NoAuthenticationInformation</Code><Message>Server failed to authenticate the request. Please refer to the information in the www-authenticate header. </Message>
+
+2025/10/02 14:37:08 cannot list files due to reason GET https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita
+--------------------------------------------------------------------------------
+RESPONSE 401: 401 Server failed to authenticate the request. Please refer to the information in the www-authenticate header.
+ERROR CODE: NoAuthenticationInformation
+--------------------------------------------------------------------------------
+﻿<?xml version="1.0" encoding="utf-8"?><Error><Code>NoAuthenticationInformation</Code><Message>Server failed to authenticate the request. Please refer to the information in the www-authenticate header.
+RequestId:7a681707-001a-0069-2eaa-331b29000000
+Time:2025-10-02T14:37:08.2721253Z</Message></Error>
+--------------------------------------------------------------------------------
+
+2025/10/02 14:37:08 Closing Log

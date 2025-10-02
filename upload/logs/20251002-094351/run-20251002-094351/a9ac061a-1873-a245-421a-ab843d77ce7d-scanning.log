@@ -1,0 +1,27 @@
+2025/10/02 14:43:53 AzcopyVersion  10.30.1
+2025/10/02 14:43:53 OS-Environment  windows
+2025/10/02 14:43:53 OS-Architecture  amd64
+2025/10/02 14:43:53 Log times are in UTC. Local time is 2 Oct 2025 09:43:53
+2025/10/02 14:43:53 ==> REQUEST/RESPONSE (Try=1/101.8789ms, OpTime=558.4997ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   HEAD https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [796a7458-401a-000a-38aa-3386d2000000]
+
+2025/10/02 14:43:53 ==> REQUEST/RESPONSE (Try=1/96.8039ms, OpTime=96.8039ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [796a745d-401a-000a-39aa-3386d2000000]
+
+2025/10/02 14:43:54 ==> REQUEST/RESPONSE (Try=1/410.5653ms, OpTime=410.5653ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita?comp=list&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [796a7460-401a-000a-3baa-3386d2000000]
+
+2025/10/02 14:43:54 cannot list files due to reason GET https://eduardlab01.file.core.windows.net/eduardlabfs/Pruebita
+--------------------------------------------------------------------------------
+RESPONSE 404: 404 The specified resource does not exist.
+ERROR CODE: ResourceNotFound
+--------------------------------------------------------------------------------
+﻿<?xml version="1.0" encoding="utf-8"?><Error><Code>ResourceNotFound</Code><Message>The specified resource does not exist.
+RequestId:796a7460-401a-000a-3baa-3386d2000000
+Time:2025-10-02T14:43:53.8877943Z</Message></Error>
+--------------------------------------------------------------------------------
+
+2025/10/02 14:43:54 Closing Log

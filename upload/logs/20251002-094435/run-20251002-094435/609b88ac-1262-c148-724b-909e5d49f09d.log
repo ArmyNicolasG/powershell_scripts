@@ -1,0 +1,129 @@
+2025/10/02 14:44:40 AzcopyVersion  10.30.1
+2025/10/02 14:44:40 OS-Environment  windows
+2025/10/02 14:44:40 OS-Architecture  amd64
+2025/10/02 14:44:40 Log times are in UTC. Local time is 2 Oct 2025 09:44:40
+2025/10/02 14:44:40 ISO 8601 START TIME: to copy files that changed before or after this job started, use the parameter --include-before=2025-10-02T14:44:35Z or --include-after=2025-10-02T14:44:35Z
+2025/10/02 14:44:40 ==> REQUEST/RESPONSE (Try=1/94.4288ms, OpTime=433.3764ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   GET https://eduardlab01.file.core.windows.net/eduardlabfs?restype=share&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [79dcb00a-801a-0077-3bab-33f7f1000000]
+
+2025/10/02 14:44:40 Any empty folders will be processed, because source and destination both support folders. For the same reason, properties and permissions defined on folders will be processed
+2025/10/02 14:44:40 Job-Command copy D:\pruebitas https://eduardlab01.file.core.windows.net/eduardlabfs/?se=2025-10-30t22%3A39%3A34z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02t14%3A24%3A34z&sv=2024-11-04 --recursive=true --overwrite=ifSourceNewer --check-length=true --output-level=Essential --preserve-smb-permissions=true --preserve-smb-info=true --backup 
+2025/10/02 14:44:40 Number of CPUs: 16
+2025/10/02 14:44:40 Max file buffer RAM 8.000 GB
+2025/10/02 14:44:40 Max concurrent network operations:  will be dynamically tuned up to 3000 (Based on auto-tuning limit. Set AZCOPY_CONCURRENCY_VALUE environment variable to override)
+2025/10/02 14:44:40 Check CPU usage when dynamically tuning concurrency: true (Based on hard-coded default. Set AZCOPY_TUNE_TO_CPU environment variable to true or false override)
+2025/10/02 14:44:40 Max concurrent transfer initiation routines: 64 (Based on hard-coded default. Set AZCOPY_CONCURRENT_FILES environment variable to override)
+2025/10/02 14:44:40 Max enumeration routines: 16 (Based on hard-coded default. Set AZCOPY_CONCURRENT_SCAN environment variable to override)
+2025/10/02 14:44:40 Parallelize getting file properties (file.Stat): false (Based on AZCOPY_PARALLEL_STAT_FILES environment variable)
+2025/10/02 14:44:40 Max open files when downloading: 2147479959 (auto-computed)
+2025/10/02 14:44:40 Final job part has been created
+2025/10/02 14:44:40 Trying 4 concurrent connections (initial starting point)
+2025/10/02 14:44:40 Final job part has been scheduled
+2025/10/02 14:44:40 WARN: [P#0-T#0] Block size 8388608 larger than maximum file chunk size, 4 MB chunk size used
+2025/10/02 14:44:40 WARN: [P#0-T#1] Block size 8388608 larger than maximum file chunk size, 4 MB chunk size used
+2025/10/02 14:44:40 WARN: [P#0-T#2] Block size 8388608 larger than maximum file chunk size, 4 MB chunk size used
+2025/10/02 14:44:40 WARN: [P#0-T#3] Block size 8388608 larger than maximum file chunk size, 4 MB chunk size used
+2025/10/02 14:44:41 INFO: [P#0-T#2] Starting transfer: Source "\\\\?\\D:\\pruebitas\\unas_pruebitas\\holitas.txt" Destination "https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas/unas_pruebitas/holitas.txt". Specified chunk size 4194304
+2025/10/02 14:44:41 INFO: [P#0-T#3] Starting transfer: Source "\\\\?\\D:\\pruebitas\\holitasos.docx" Destination "https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas/holitasos.docx". Specified chunk size 4194304
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/125.3343ms, OpTime=125.3343ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [79dcb013-801a-0077-40ab-33f7f1000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/96.1583ms, OpTime=220.4921ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   HEAD https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Fholitasos.docx?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [79dcb014-801a-0077-41ab-33f7f1000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/95.7079ms, OpTime=316.2187ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   HEAD https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Funas_pruebitas%2Fholitas.txt?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [79dcb015-801a-0077-42ab-33f7f1000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/104.3841ms, OpTime=277.7721ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas/unas_pruebitas?restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [d92c5621-e01a-005e-54ab-33c985000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/110.2355ms, OpTime=188.5929ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Fholitasos.docx?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [180e5450-701a-002e-5bab-337072000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/97.4099ms, OpTime=97.4099ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Funas_pruebitas%2Fholitas.txt?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [79dcb016-801a-0077-43ab-33f7f1000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/94.5584ms, OpTime=94.5584ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas?comp=metadata&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [d92c5624-e01a-005e-55ab-33c985000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/99.3472ms, OpTime=107.3874ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Funas_pruebitas?comp=metadata&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [180e5453-701a-002e-5cab-337072000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/105.697ms, OpTime=105.697ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Funas_pruebitas%2Fholitas.txt?comp=range&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [79dcb017-801a-0077-44ab-33f7f1000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/105.697ms, OpTime=106.0098ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Fholitasos.docx?comp=range&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [49b8bbdd-301a-004d-06ab-33ed89000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/98.8525ms, OpTime=98.8525ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Funas_pruebitas?comp=properties&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [180e5454-701a-002e-5dab-337072000000]
+
+2025/10/02 14:44:41 INFO: [P#0-T#0] UPLOADSUCCESSFUL: (folder properties) https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas/unas_pruebitas
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/134.296ms, OpTime=134.296ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas?comp=properties&restype=directory&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [d92c5626-e01a-005e-56ab-33c985000000]
+
+2025/10/02 14:44:41 INFO: [P#0-T#1] UPLOADSUCCESSFUL: (folder properties) https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/104.0511ms, OpTime=104.0511ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Funas_pruebitas%2Fholitas.txt?comp=properties&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [79dcb019-801a-0077-45ab-33f7f1000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/105.6395ms, OpTime=106.1874ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   PUT https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Fholitasos.docx?comp=properties&se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [21d0c33b-f01a-0020-6eab-3359c2000000]
+
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/93.7663ms, OpTime=93.7663ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   HEAD https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Funas_pruebitas%2Fholitas.txt?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [d92c5628-e01a-005e-57ab-33c985000000]
+
+2025/10/02 14:44:41 INFO: [P#0-T#2] UPLOADSUCCESSFUL: https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas/unas_pruebitas/holitas.txt
+2025/10/02 14:44:41 ==> REQUEST/RESPONSE (Try=1/99.648ms, OpTime=99.648ms) -- RESPONSE SUCCESSFULLY RECEIVED
+   HEAD https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas%2Fholitasos.docx?se=2025-10-30T22%3A39%3A34Z&sig=-REDACTED-&sp=rwdlc&spr=https&srt=sco&ss=f&st=2025-10-02T14%3A24%3A34Z&sv=2024-11-04
+   X-Ms-Request-Id: [21d0c340-f01a-0020-71ab-3359c2000000]
+
+2025/10/02 14:44:41 INFO: [P#0-T#3] UPLOADSUCCESSFUL: https://eduardlab01.file.core.windows.net/eduardlabfs/pruebitas/holitasos.docx
+2025/10/02 14:44:41 JobID=609b88ac-1262-c148-724b-909e5d49f09d, Part#=0, TransfersDone=4 of 4
+2025/10/02 14:44:41 all parts of entire Job 609b88ac-1262-c148-724b-909e5d49f09d successfully completed, cancelled or paused
+2025/10/02 14:44:41 is part of Job which 1 total number of parts done 
+2025/10/02 14:44:42 PERF: primary performance constraint is Unknown. States: X:  0, O:  0, M:  0, L:  0, R:  0, D:  0, W:  0, F:  0, B:  0, E:  0, T:  0, GRs:  4
+2025/10/02 14:44:42 100.0 %, 4 Done, 0 Failed, 0 Pending, 0 Skipped, 4 Total, 2-sec Throughput (Mb/s): 0.0479
+2025/10/02 14:44:42 
+
+Diagnostic stats:
+IOPS: 5
+End-to-end ms per request: 141
+Network Errors: 0.00%
+Server Busy: 0.00%
+
+
+Job 609b88ac-1262-c148-724b-909e5d49f09d summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 2
+Number of Folder Property Transfers: 2
+Number of Symlink Transfers: 0
+Total Number of Transfers: 4
+Number of File Transfers Completed: 2
+Number of Folder Transfers Completed: 2
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 11974
+Final Job Status: Completed
+
+2025/10/02 14:44:42 Closing Log
