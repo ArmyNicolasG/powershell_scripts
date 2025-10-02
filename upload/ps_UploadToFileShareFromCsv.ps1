@@ -191,12 +191,22 @@ if ($Sas) {
 # Test rápido de autenticación
 function Test-AzCopyAuth {
   param([string]$Az, [string]$UrlReal, [string]$UrlMask)
-  Write-Host "Validando acceso sin listar contenido…"
-  $tmp = ($UrlReal.TrimEnd('/')) + "/__auth_check__$(Get-Random)"
-  & "$Az" make "$tmp" 2>&1 | Tee-Object -Variable out | Out-Host
-  if ($LASTEXITCODE -ne 0) { throw "Auth FAILED. Mensaje arriba." }
-  & "$Az" rm "$tmp" --recursive=true --from-to=AzureFile~AzureFile 1>$null 2>$null
-  Write-Host "Auth OK ✅"
+  Write-Section "Test de autenticación (azcopy ls)"
+  Write-Host ("Probar destino: {0}" -f $UrlMask)
+
+  # 'ls' sin flags para máxima compatibilidad
+  & "$Az" ls "$UrlReal" 2>&1 | Tee-Object -Variable lsOut | Out-Host
+  $code = $LASTEXITCODE
+
+  if ($code -ne 0) {
+    if ($lsOut -match 'AuthenticationFailed') {
+      throw "Auth FAILED. Revisa reloj y SAS (ss=f, srt=sco, sp=rwdlacupx, st en el pasado, spr=https)."
+    } else {
+      throw "azcopy ls falló con código $code. Mensaje arriba."
+    }
+  } else {
+    Write-Host "Auth OK ✅"
+  }
 }
 
 Test-AzCopyAuth -Az $azcopy -UrlReal $destUrl -UrlMask $destMasked
