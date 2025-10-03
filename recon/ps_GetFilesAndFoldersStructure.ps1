@@ -1,12 +1,20 @@
+<#
+REPORTE DE ACCESIBILIDAD DE CARPETAS (rápido, sin tamaños ni archivos)
+- Recorre carpetas en BFS y registra:
+  Type=Folder, Name, Path, ItemCountImmediate, LastWriteTime, AccessStatus(OK/PARTIAL/DENIED), AccessErrors, UserHasAccess
+- "UserHasAccess" indica si se pudo abrir/listar la carpeta (no es evaluación de ACLs).
+- "AccessErrors" son errores encontrados al listar hijos; aún así seguimos con lo que sí se pudo leer.
+#>
+
 [CmdletBinding()]
 param(
   [string]$ComputerName = 'localhost',
   [Parameter(Mandatory = $true)]
-  [string]$Path,
-  [int]$Depth = -1,   # -1 = sin límite; ej. 3 (solo PS7+)
-  [string]$OutCsv,
-  [switch]$Utc,
-  [string]$LogPath
+  [string]$Path,                 # Ej: D:\Datos o \\Server\Share\Ruta
+  [int]$Depth = -1,              # -1 = sin límite; 0 = solo carpeta raíz; 1 = raíz + hijos directos
+  [string]$OutCsv,               # CSV incremental (UTF-8)
+  [switch]$Utc,                  # Fechas en UTC (si no, local con offset)
+  [string]$LogPath               # LOG en tiempo real
 )
 
 function Invoke-Local  { param([ScriptBlock]$Script, [hashtable]$ParamMap) & $Script @ParamMap }
@@ -28,11 +36,20 @@ $core = {
     return $dt.ToString('yyyy-MM-ddTHH:mm:sszzz',[Globalization.CultureInfo]::InvariantCulture)
   }
 
-  $asUtcBool = [bool]$Utc
-  $logWriter = $null; $csvWriter = $null
+  # Normaliza ruta para evitar barra final duplicada
+  function Normalize-PathNoTrail([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return $p }
+    $np = $p.TrimEnd('\','/')
+    if ($np.Length -eq 2 -and $np[1] -eq ':') { return $np } # Ej: "D:"
+    return $np
+  }
 
+  $asUtcBool = [bool]$Utc
+  $Path = Normalize-PathNoTrail $Path
+
+  # LOG
+  $logWriter = $null; $csvWriter = $null
   try {
-    # LOG
     if ($LogPath) {
       $logDir = Split-Path -Parent $LogPath
       if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
@@ -48,24 +65,16 @@ $core = {
     }
 
     # CSV
-    $columns = @(
-      'Type','Name','Path',
-      'ItemCountImmediate',
-      'LastWriteTime','AccessStatus','AccessErrors','UserHasAccess'
-    )
-
-    function Escape-CsvValue {
-      param([object]$v)
+    $columns = @('Type','Name','Path','ItemCountImmediate','LastWriteTime','AccessStatus','AccessErrors','UserHasAccess')
+    function Escape-CsvValue { param([object]$v)
       if ($null -eq $v) { return '' }
       $s = [string]$v
       $needsQuotes = $s.Contains('"') -or $s.Contains(',') -or $s.Contains("`n") -or $s.Contains("`r")
       if ($s.Contains('"')) { $s = $s -replace '"','""' }
-      if ($needsQuotes) { return '"' + $s + '"' }
-      return $s
+      if ($needsQuotes) { return '"' + $s + '"' } else { return $s }
     }
     function Write-CsvHeader { param([string[]]$Cols) if ($null -eq $csvWriter) { return }; $csvWriter.WriteLine( ($Cols | % { Escape-CsvValue $_ }) -join ',' ) }
-    function Write-CsvRow    {
-      param([psobject]$Row)
+    function Write-CsvRow    { param([psobject]$Row)
       if ($null -eq $csvWriter) { return }
       $vals = foreach ($c in $columns) { if ($Row.PSObject.Properties.Name -contains $c) { $Row.$c } else { $null } }
       $csvWriter.WriteLine( ($vals | % { Escape-CsvValue $_ }) -join ',' )
@@ -81,103 +90,101 @@ $core = {
       if ($needHeader) { Write-CsvHeader -Cols $columns }
     }
 
-    # Validación
-    if (-not (Test-Path -LiteralPath $Path)) { Write-Log "Ruta no existe o no es accesible: $Path" "ERROR"; throw "La ruta no existe o no es accesible: $Path" }
-
-    # Enumeración helper (PS7 Depth aware)
-    function Get-Children {
-      param([string]$Base,[switch]$FilesOnly,[switch]$DirsOnly,[int]$Depth)
-      $params = @{
-        LiteralPath = $Base; Force = $true; ErrorAction = 'SilentlyContinue'; Recurse = $true
-      }
-      if ($FilesOnly) { $params['File'] = $true }
-      if ($DirsOnly)  { $params['Directory'] = $true }
-      $supportsDepth = $PSVersionTable.PSVersion.Major -ge 7 -and (Get-Command Get-ChildItem).Parameters.ContainsKey('Depth')
-      if ($Depth -ge 0 -and $supportsDepth) { $params['Depth'] = $Depth }
-      Get-ChildItem @params
+    # Validación de raíz
+    if (-not (Test-Path -LiteralPath $Path)) {
+      Write-Log "Ruta no existe o no es accesible: $Path" "ERROR"; throw "La ruta no existe o no es accesible: $Path"
     }
 
-    # Acumuladores resumen
-    $script:TotalFiles = 0
-    $script:TotalFolders = 0
-    $script:TotalAccessErrors = 0
+    # Enumeración segura por carpeta (TopDirectoryOnly)
+    function List-Names-Safe {
+      param([string]$dir)
+      $errors = 0
+      $okOpen = $false
+      $names  = @()
+      $dirNames = @()
 
-    # 1) Carpetas (incluye raíz)
-    $rootDir = Get-Item -LiteralPath $Path -ErrorAction Stop
-    $allDirsEnum = @($rootDir) + (Get-Children -Base $Path -DirsOnly -Depth $Depth)
-
-    foreach ($d in $allDirsEnum) {
-      $script:TotalFolders++
-
-      # ¿Podemos leer metadatos básicos de la carpeta?
-      $dirReadable = $true
-      try { $null = $d.Attributes } catch { $dirReadable = $false }
-
-      # Conteo inmediato (no recursivo)
-      $ev1 = @()
-      $immediateCount = (Get-ChildItem -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue -ErrorVariable +ev1 | Measure-Object).Count
-
-      $accErrors = $ev1.Count
-      $script:TotalAccessErrors += $accErrors
-
-      $accessStatus = if (-not $dirReadable) { 'DENIED' } elseif ($accErrors -gt 0) { 'PARTIAL' } else { 'OK' }
-
-      $row = [pscustomobject]@{
-        Type               = 'Folder'
-        Name               = $d.Name
-        Path               = $d.FullName
-        ItemCountImmediate = $immediateCount
-        LastWriteTime      = (Format-Date -dt $d.LastWriteTime -AsUtc:$asUtcBool)
-        AccessStatus       = $accessStatus
-        AccessErrors       = $accErrors
-        UserHasAccess      = [bool]$dirReadable
-      }
-
-      $lvl = switch ($accessStatus) { 'OK'{'INFO'} 'PARTIAL'{'WARN'} default{'ERROR'} }
-      Write-Log ("FOLDER: Path='{0}' Immediate={1} Access={2} Errors={3}" -f `
-        $row.Path,$row.ItemCountImmediate,$row.AccessStatus,$row.AccessErrors) $lvl
-
-      Write-CsvRow -Row $row
-      $row
-    }
-
-    # 2) Archivos (streaming, sin tamaños)
-    Get-Children -Base $Path -FilesOnly -Depth $Depth | ForEach-Object {
-      $f = $_
-      $lw = $null; $accessStatus = 'OK'; $accErrors = 0; $hasAccess = $true
+      # Paso 1: probar "abrir" la carpeta (comprobación real de acceso)
       try {
-        try { $lw = (Format-Date -dt $f.LastWriteTime -AsUtc:$asUtcBool) }
-        catch {
-          if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception -is [System.Security.SecurityException]) {
-            $hasAccess = $false; $accessStatus = 'DENIED'; $accErrors = 1; $script:TotalAccessErrors++
-          } else { throw }
-        }
-        if ($hasAccess) { $script:TotalFiles++ }
+        $enum = [System.IO.Directory]::EnumerateFileSystemEntries($dir, '*', [System.IO.SearchOption]::TopDirectoryOnly).GetEnumerator()
+        $okOpen = $true
+        # No necesitamos recorrer aquí; hacemos la lista con PowerShell para separar dirs
       }
       catch {
-        $hasAccess = $false; $accessStatus = 'DENIED'; $accErrors = 1; $script:TotalAccessErrors++
+        # Si no podemos enumerar ni abrir, es DENIED.
+        return [pscustomobject]@{
+          CanOpen = $false; Names = @(); DirNames = @(); Errors = 1
+        }
       }
 
-      $row = [pscustomobject]@{
-        Type               = 'File'
-        Name               = $f.Name
-        Path               = $f.FullName
-        ItemCountImmediate = $null
-        LastWriteTime      = $lw
-        AccessStatus       = $accessStatus
-        AccessErrors       = $accErrors
-        UserHasAccess      = [bool]$hasAccess
+      # Paso 2: listar NOMBRES (no metadatos) + capturar errores puntuales
+      $ev = @()
+      $names = Get-ChildItem -LiteralPath $dir -Force -Name -ErrorAction SilentlyContinue -ErrorVariable +ev
+      $errors += $ev.Count
+
+      $ev2 = @()
+      $dirNames = Get-ChildItem -LiteralPath $dir -Force -Name -Directory -ErrorAction SilentlyContinue -ErrorVariable +ev2
+      $errors += $ev2.Count
+
+      return [pscustomobject]@{
+        CanOpen = $okOpen; Names = $names; DirNames = $dirNames; Errors = $errors
       }
-
-      $lvl = switch ($accessStatus) { 'OK'{'INFO'} default{'WARN'} }
-      Write-Log ("FILE: Path='{0}' LastWrite='{1}' Access={2}" -f `
-        $row.Path,$row.LastWriteTime,$row.AccessStatus) $lvl
-
-      Write-CsvRow -Row $row
-      $row
     }
 
-    # 3) Summary final
+    # BFS (cola) para garantizar avance aunque haya errores parciales
+    $queue = New-Object 'System.Collections.Generic.Queue[object]'
+    $queue.Enqueue([pscustomobject]@{ Path = $Path; Depth = 0 })
+
+    $totalFolders = 0
+    $totalErrors  = 0
+
+    while ($queue.Count -gt 0) {
+      $node = $queue.Dequeue()
+      $curPath = $node.Path
+      $curDepth = [int]$node.Depth
+      $totalFolders++
+
+      # LastWriteTime (no bloqueante)
+      $lw = $null
+      try { $lw = (Get-Item -LiteralPath $curPath -ErrorAction Stop).LastWriteTime } catch {}
+
+      # Listar de forma segura
+      $r = List-Names-Safe -dir $curPath
+      $totalErrors += [int]$r.Errors
+
+      $status = if (-not $r.CanOpen) { 'DENIED' } elseif ($r.Errors -gt 0) { 'PARTIAL' } else { 'OK' }
+      $hasAccess = [bool]$r.CanOpen
+      $immediateCount = @($r.Names).Count
+
+      # Registrar fila
+      $row = [pscustomobject]@{
+        Type               = 'Folder'
+        Name               = (Split-Path -Leaf $curPath)
+        Path               = $curPath
+        ItemCountImmediate = $immediateCount
+        LastWriteTime      = if ($lw) { if ($asUtcBool) { (Get-Date $lw) } else { $lw } } else { $null } |
+                             ForEach-Object { if ($_ -ne $null) { if ($asUtcBool) { $_.ToUniversalTime() } else { $_ } } } |
+                             ForEach-Object { if ($_ -ne $null) { Format-Date -dt $_ -AsUtc:$asUtcBool } else { $null } }
+        AccessStatus       = $status
+        AccessErrors       = [int]$r.Errors
+        UserHasAccess      = $hasAccess
+      }
+
+      $lvl = switch ($status) { 'OK'{'INFO'} 'PARTIAL'{'WARN'} default{'ERROR'} }
+      $msg = "FOLDER: '$($row.Path)' | Immediate=$($row.ItemCountImmediate) | Access=$($row.AccessStatus) | Errors=$($row.AccessErrors)"
+      switch ($lvl) { 'INFO'{Write-Host $msg} 'WARN'{Write-Warning $msg} 'ERROR'{Write-Error $msg} }
+      Write-CsvRow -Row $row
+
+      # Encolar subcarpetas si aún hay profundidad disponible y pudimos abrir la carpeta
+      $nextDepthAllowed = ($Depth -lt 0) -or ($curDepth -lt $Depth)
+      if ($hasAccess -and $nextDepthAllowed -and $r.DirNames) {
+        foreach ($dn in $r.DirNames) {
+          $child = Join-Path -Path $curPath -ChildPath $dn
+          $queue.Enqueue([pscustomobject]@{ Path = $child; Depth = $curDepth + 1 })
+        }
+      }
+    }
+
+    # Summary
     $summary = [pscustomobject]@{
       Type               = 'Summary'
       Name               = 'TOTAL'
@@ -185,11 +192,10 @@ $core = {
       ItemCountImmediate = $null
       LastWriteTime      = (Format-Date -dt (Get-Date) -AsUtc:$asUtcBool)
       AccessStatus       = 'OK'
-      AccessErrors       = $script:TotalAccessErrors
+      AccessErrors       = $totalErrors
       UserHasAccess      = $true
     }
-    Write-Log ("SUMMARY: Files={0} Folders={1} AccessErrors={2}" -f `
-      $script:TotalFiles,$script:TotalFolders,$script:TotalAccessErrors) 'INFO'
+    Write-Host ("SUMMARY: Folders={0} Errors={1}" -f $totalFolders,$totalErrors)
     Write-CsvRow -Row $summary
     $summary
   }
