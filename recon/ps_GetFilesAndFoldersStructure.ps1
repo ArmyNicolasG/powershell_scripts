@@ -1,10 +1,3 @@
-<#
-Reporte de archivos/carpetas con flags de acceso corregidos y columna CumulativeBytes.
-- AccessStatus: OK / PARTIAL / DENIED
-- AccessErrors: número de errores al enumerar
-- CumulativeBytes: acumulado de bytes de archivos procesados (total al final)
-#>
-
 [CmdletBinding()]
 param(
   [string]$ComputerName = 'localhost',
@@ -39,6 +32,7 @@ $core = {
   $logWriter = $null; $csvWriter = $null
 
   try {
+    # LOG
     if ($LogPath) {
       $logDir = Split-Path -Parent $LogPath
       if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
@@ -53,10 +47,11 @@ $core = {
       if ($null -ne $logWriter) { $logWriter.WriteLine($line) }
     }
 
+    # CSV
     $columns = @(
       'Type','Name','Path',
-      'ItemCountImmediate','ItemCountTotal','FolderSizeBytes','FileSizeBytes',
-      'CumulativeBytes','LastWriteTime','AccessStatus','AccessErrors','UserHasAccess'
+      'ItemCountImmediate',
+      'LastWriteTime','AccessStatus','AccessErrors','UserHasAccess'
     )
 
     function Escape-CsvValue {
@@ -86,8 +81,10 @@ $core = {
       if ($needHeader) { Write-CsvHeader -Cols $columns }
     }
 
+    # Validación
     if (-not (Test-Path -LiteralPath $Path)) { Write-Log "Ruta no existe o no es accesible: $Path" "ERROR"; throw "La ruta no existe o no es accesible: $Path" }
 
+    # Enumeración helper (PS7 Depth aware)
     function Get-Children {
       param([string]$Base,[switch]$FilesOnly,[switch]$DirsOnly,[int]$Depth)
       $params = @{
@@ -100,37 +97,27 @@ $core = {
       Get-ChildItem @params
     }
 
-    # Acumuladores globales
-    $script:CumulativeBytes = [int64]0
+    # Acumuladores resumen
     $script:TotalFiles = 0
     $script:TotalFolders = 0
     $script:TotalAccessErrors = 0
 
-    # 1) Carpetas
+    # 1) Carpetas (incluye raíz)
     $rootDir = Get-Item -LiteralPath $Path -ErrorAction Stop
     $allDirsEnum = @($rootDir) + (Get-Children -Base $Path -DirsOnly -Depth $Depth)
 
     foreach ($d in $allDirsEnum) {
       $script:TotalFolders++
 
-      # ¿Podemos leer el objeto carpeta?
+      # ¿Podemos leer metadatos básicos de la carpeta?
       $dirReadable = $true
       try { $null = $d.Attributes } catch { $dirReadable = $false }
 
-      # Inmediatos
+      # Conteo inmediato (no recursivo)
       $ev1 = @()
       $immediateCount = (Get-ChildItem -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue -ErrorVariable +ev1 | Measure-Object).Count
 
-      # Recursivo: contar y sumar tamaños (ignorando errores, pero contabilizándolos)
-      $ev2 = @()
-      $totalItems = 0; $totalSize = [int64]0
-      Get-ChildItem -LiteralPath $d.FullName -Force -Recurse -ErrorAction SilentlyContinue -ErrorVariable +ev2 |
-        ForEach-Object {
-          $totalItems++
-          if (-not $_.PSIsContainer) { $totalSize += [int64]$_.Length }
-        }
-
-      $accErrors = ($ev1.Count + $ev2.Count)
+      $accErrors = $ev1.Count
       $script:TotalAccessErrors += $accErrors
 
       $accessStatus = if (-not $dirReadable) { 'DENIED' } elseif ($accErrors -gt 0) { 'PARTIAL' } else { 'OK' }
@@ -140,10 +127,6 @@ $core = {
         Name               = $d.Name
         Path               = $d.FullName
         ItemCountImmediate = $immediateCount
-        ItemCountTotal     = $totalItems
-        FolderSizeBytes    = $totalSize
-        FileSizeBytes      = $null
-        CumulativeBytes    = $script:CumulativeBytes
         LastWriteTime      = (Format-Date -dt $d.LastWriteTime -AsUtc:$asUtcBool)
         AccessStatus       = $accessStatus
         AccessErrors       = $accErrors
@@ -151,25 +134,25 @@ $core = {
       }
 
       $lvl = switch ($accessStatus) { 'OK'{'INFO'} 'PARTIAL'{'WARN'} default{'ERROR'} }
-      Write-Log ("FOLDER: Path='{0}' Immediate={1} TotalItems={2} SizeBytes={3} Access={4} Errors={5}" -f `
-        $row.Path,$row.ItemCountImmediate,$row.ItemCountTotal,$row.FolderSizeBytes,$row.AccessStatus,$row.AccessErrors) $lvl
+      Write-Log ("FOLDER: Path='{0}' Immediate={1} Access={2} Errors={3}" -f `
+        $row.Path,$row.ItemCountImmediate,$row.AccessStatus,$row.AccessErrors) $lvl
 
       Write-CsvRow -Row $row
       $row
     }
 
-    # 2) Archivos (streaming con acumulado)
+    # 2) Archivos (streaming, sin tamaños)
     Get-Children -Base $Path -FilesOnly -Depth $Depth | ForEach-Object {
       $f = $_
-      $size = $null; $lw = $null; $accessStatus = 'OK'; $accErrors = 0; $hasAccess = $true
+      $lw = $null; $accessStatus = 'OK'; $accErrors = 0; $hasAccess = $true
       try {
-        try { $size = [int64]$f.Length; $lw = (Format-Date -dt $f.LastWriteTime -AsUtc:$asUtcBool) }
+        try { $lw = (Format-Date -dt $f.LastWriteTime -AsUtc:$asUtcBool) }
         catch {
           if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception -is [System.Security.SecurityException]) {
-            $hasAccess = $false; $accessStatus = 'DENIED'; $size = 0; $lw = $null; $accErrors = 1; $script:TotalAccessErrors++
+            $hasAccess = $false; $accessStatus = 'DENIED'; $accErrors = 1; $script:TotalAccessErrors++
           } else { throw }
         }
-        if ($hasAccess) { $script:CumulativeBytes += $size; $script:TotalFiles++ }
+        if ($hasAccess) { $script:TotalFiles++ }
       }
       catch {
         $hasAccess = $false; $accessStatus = 'DENIED'; $accErrors = 1; $script:TotalAccessErrors++
@@ -180,41 +163,33 @@ $core = {
         Name               = $f.Name
         Path               = $f.FullName
         ItemCountImmediate = $null
-        ItemCountTotal     = $null
-        FolderSizeBytes    = $null
-        FileSizeBytes      = $size
-        CumulativeBytes    = $script:CumulativeBytes
         LastWriteTime      = $lw
         AccessStatus       = $accessStatus
         AccessErrors       = $accErrors
         UserHasAccess      = [bool]$hasAccess
       }
 
-      $lvl = switch ($accessStatus) { 'OK'{'INFO'} 'PARTIAL'{'WARN'} default{'WARN'} }
-      Write-Log ("FILE: Path='{0}' SizeBytes={1} LastWrite='{2}' Access={3}" -f `
-        $row.Path,$row.FileSizeBytes,$row.LastWriteTime,$row.AccessStatus) $lvl
+      $lvl = switch ($accessStatus) { 'OK'{'INFO'} default{'WARN'} }
+      Write-Log ("FILE: Path='{0}' LastWrite='{1}' Access={2}" -f `
+        $row.Path,$row.LastWriteTime,$row.AccessStatus) $lvl
 
       Write-CsvRow -Row $row
       $row
     }
 
-    # 3) Summary final (total bajo $Path)
+    # 3) Summary final
     $summary = [pscustomobject]@{
       Type               = 'Summary'
       Name               = 'TOTAL'
       Path               = $Path
       ItemCountImmediate = $null
-      ItemCountTotal     = $script:TotalFiles
-      FolderSizeBytes    = $null
-      FileSizeBytes      = $null
-      CumulativeBytes    = $script:CumulativeBytes
       LastWriteTime      = (Format-Date -dt (Get-Date) -AsUtc:$asUtcBool)
       AccessStatus       = 'OK'
       AccessErrors       = $script:TotalAccessErrors
       UserHasAccess      = $true
     }
-    Write-Log ("SUMMARY: Files={0} Folders={1} TotalBytes={2} AccessErrors={3}" -f `
-      $script:TotalFiles,$script:TotalFolders,$script:CumulativeBytes,$script:TotalAccessErrors) 'INFO'
+    Write-Log ("SUMMARY: Files={0} Folders={1} AccessErrors={2}" -f `
+      $script:TotalFiles,$script:TotalFolders,$script:TotalAccessErrors) 'INFO'
     Write-CsvRow -Row $summary
     $summary
   }
