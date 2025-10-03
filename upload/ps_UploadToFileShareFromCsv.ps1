@@ -31,7 +31,7 @@
   Nº de rutas por lote (include-path)
 
 .PARAMETER PreservePermissions
-  Activa --preserve-smb-permissions/--preserve-smb-info y --backup
+  Activa --preserve-smb-permissions/--preserve-smb-info (sin --backup)
 
 .PARAMETER LogDir
   Carpeta base de logs (se crea subcarpeta por corrida)
@@ -84,25 +84,15 @@ function Parse-SasWindow {
   if (-not $sas) { return $null }
 
   $q = $sas.TrimStart('?')
-  $map = @{}
+  $map = @{ }
   foreach ($kv in $q -split '&') {
     $parts = $kv -split '=',2
     if ($parts.Count -eq 2) { $map[$parts[0]] = [System.Uri]::UnescapeDataString($parts[1]) }
   }
 
   $stUtc = $null; $seUtc = $null
-
-  if ($map['st']) {
-    try {
-      # SAS normalmente viene en ISO 8601 (ej: 2025-10-01T13:45:19Z)
-      $stUtc = ([datetimeoffset]::Parse($map['st'], [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime
-    } catch { $stUtc = $null }
-  }
-  if ($map['se']) {
-    try {
-      $seUtc = ([datetimeoffset]::Parse($map['se'], [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime
-    } catch { $seUtc = $null }
-  }
+  if ($map['st']) { try { $stUtc = ([datetimeoffset]::Parse($map['st'], [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime } catch { $stUtc = $null } }
+  if ($map['se']) { try { $seUtc = ([datetimeoffset]::Parse($map['se'], [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime } catch { $seUtc = $null } }
 
   [pscustomobject]@{
     StartUtc = $stUtc
@@ -112,7 +102,6 @@ function Parse-SasWindow {
     Perms    = $map['sp']
   }
 }
-
 
 function Write-Section { param([string]$title) Write-Host "`n=== $title ===" -ForegroundColor Cyan }
 
@@ -125,7 +114,6 @@ New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $runDir = Join-Path $LogDir ("run-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 $stdOutPath = Join-Path $runDir 'azcopy-stdout.log'
-$stdErrPath = Join-Path $runDir 'azcopy-stderr.log'
 
 # ---------- construir destino ----------
 $baseUrl = "https://$StorageAccount.file.core.windows.net/$ShareName"
@@ -133,18 +121,24 @@ if ($DestSubPath) {
   $DestSubPath = $DestSubPath.Trim('\','/')
   $baseUrl = "$baseUrl/$DestSubPath"
 }
-$destUrl = if ($Sas) { "$baseUrl$Sas" } else { $baseUrl }
+$destUrl    = if ($Sas) { "$baseUrl$Sas" } else { $baseUrl }
 $destMasked = if ($Sas) { Mask-Sas $destUrl } else { $destUrl }
 
 # ---------- entorno AzCopy ----------
 $env:AZCOPY_LOG_LOCATION      = $runDir
 $env:AZCOPY_JOB_PLAN_LOCATION = $runDir
 $env:AZCOPY_CONCURRENCY_VALUE = "AUTO"
+$env:AZCOPY_LOG_LEVEL         = "INFO"      # para logs internos más detallados
+$env:AZCOPY_REDACT_SAS        = "true"
 if ($AccountKey -and -not $Sas) { $env:AZCOPY_ACCOUNT_KEY = $AccountKey }
 
 # ---------- args comunes ----------
 $permArgs = @()
-if ($PreservePermissions) { $permArgs += "--preserve-smb-permissions=true"; $permArgs += "--preserve-smb-info=true"; $permArgs }
+if ($PreservePermissions) {
+  $permArgs += "--preserve-smb-permissions=true"
+  $permArgs += "--preserve-smb-info=true"
+  # (sin --backup, según lo solicitado)
+}
 
 $ow = switch ($OverwriteMode) {
   'True'          { 'true' }
@@ -156,8 +150,9 @@ $ow = switch ($OverwriteMode) {
 $commonArgs = @(
   "--recursive=true",
   "--overwrite=$ow",
-  "--check-length=true",
-  "--output-level=Essential"
+  "--check-length=false",
+  "--output-level=Essential",   # muestra cada transferencia en consola
+  "--log-level=INFO"       # y en los logs internos
 ) + $permArgs
 
 # ---------- pre-flight ----------
@@ -167,7 +162,7 @@ Write-Host ("Ejecutable : {0}" -f $azcopy)
 Write-Host ("Origen     : {0}" -f $SourceRoot)
 Write-Host ("Destino    : {0}" -f $destMasked)
 Write-Host ("Overwrite  : {0}" -f $OverwriteMode)
-Write-Host ("Permisos   : {0}" -f ($PreservePermissions ? 'preserve SMB perms + info + backup' : 'NO preservar permisos'))
+Write-Host ("Permisos   : {0}" -f ($PreservePermissions ? 'preserve SMB perms + info' : 'NO preservar permisos'))
 Write-Host ("Logs en    : {0}" -f $runDir)
 
 # Mostrar ventana del SAS y alertar por reloj
@@ -180,7 +175,7 @@ if ($Sas) {
     Write-Host ("SAS Expiry (UTC): {0:yyyy-MM-ddTHH:mm:ssZ}" -f $sw.ExpiryUtc)
     Write-Host ("Now (UTC):        {0:yyyy-MM-ddTHH:mm:ssZ}" -f $nowUtc)
     if ($sw.StartUtc -and $nowUtc -lt $sw.StartUtc.AddMinutes(-5)) {
-      Write-Warning "El SAS aún no está 'activo' según tu reloj local (st > ahora). Ajusta reloj o regenera SAS con 'st' en el pasado."
+      Write-Warning "El SAS aún no está 'activo' según tu reloj local (st > ahora)."
     }
     if ($sw.ExpiryUtc -and $nowUtc -gt $sw.ExpiryUtc) {
       Write-Warning "El SAS está expirado."
@@ -188,26 +183,13 @@ if ($Sas) {
   }
 }
 
-# Test rápido de autenticación
+# Test rápido de autenticación (SIN enumerar con 'ls')
 function Test-AzCopyAuth {
   param([string]$Az, [string]$UrlReal, [string]$UrlMask)
-  Write-Section "Test de autenticación (azcopy ls)"
-  Write-Host ("Probar destino: {0}" -f $UrlMask)
-
-  # 'ls' sin flags para máxima compatibilidad
-  $code = $LASTEXITCODE
-
-  if ($code -ne 0) {
-    if ($lsOut -match 'AuthenticationFailed') {
-      throw "Auth FAILED. Revisa reloj y SAS (ss=f, srt=sco, sp=rwdlacupx, st en el pasado, spr=https)."
-    } else {
-      throw "azcopy ls falló con código $code. Mensaje arriba."
-    }
-  } else {
-    Write-Host "Auth OK ✅"
-  }
+  Write-Section "Test de autenticación (sin listar contenido)"
+  Write-Host ("Destino: {0}" -f $UrlMask)
+  Write-Host "Se omite 'azcopy ls' para no disparar una enumeración masiva. Los errores de autenticación aparecerán durante la copia."
 }
-
 Test-AzCopyAuth -Az $azcopy -UrlReal $destUrl -UrlMask $destMasked
 
 # ---------- ejecución AzCopy ----------
@@ -218,18 +200,15 @@ function Invoke-AzCopy {
   Write-Host ($cmdMasked -join ' ')
 
   Write-Section "Ejecución"
-  & "$azcopy" copy "$Src" "$Dst" @ArgsToUse 2> "$stdErrPath" | Tee-Object -FilePath "$stdOutPath"
+  # Muestra TODO (stdout+stderr) en consola y guarda log combinado
+  & "$azcopy" copy "$Src" "$Dst" @ArgsToUse 2>&1 | Tee-Object -FilePath "$stdOutPath"
   $exit = $LASTEXITCODE
-  Write-Host "`nExitCode: $exit  (stdout: $stdOutPath  / stderr: $stdErrPath)"
+  Write-Host "`nExitCode: $exit  (log combinado: $stdOutPath)"
 
-  $azLog = Select-String -Path $stdOutPath -Pattern 'Log file is located at:\s*(.*)$' | Select-Object -Last 1
-  if ($azLog) {
-    $logPath = $azLog.Matches[0].Groups[1].Value.Trim()
-    Write-Host "AzCopy log: $logPath"
-    if ($exit -ne 0 -and (Test-Path -LiteralPath $logPath)) {
-      Write-Section "Últimas 60 líneas del log de AzCopy"
-      Get-Content -LiteralPath $logPath -Tail 60
-    }
+  # Si falló, muestra un extracto útil
+  if ($exit -ne 0 -and (Test-Path -LiteralPath $stdOutPath)) {
+    Write-Section "Últimas 80 líneas del log combinado"
+    Get-Content -LiteralPath $stdOutPath -Tail 80
   }
 
   if ($exit -ne 0) { throw "AzCopy retornó código $exit" }
@@ -251,9 +230,8 @@ function Start-CsvSelectiveCopy {
 
   $candidateCols = @('FilePath','Path','Ruta','FullName','FolderPath')
   $first = $rows[0]
-  $col = $candidateCols | Where-Object { $_ -in $first.PSObject.Properties.Name }
+  $col = $candidateCols | Where-Object { $_ -in $first.PSObject.Properties.Name } | Select-Object -First 1
   if (-not $col) { throw "No se detectó columna de ruta en CSV. Esperaba: $($candidateCols -join ', ')" }
-  $col = $col[0]
 
   $allPaths = foreach ($r in $rows) {
     $p = $r.$col; if ([string]::IsNullOrWhiteSpace($p)) { continue }
@@ -295,7 +273,7 @@ try {
 catch {
   Write-Section "ERROR"
   Write-Error $_.Exception.Message
-  Write-Host "Revisa: $stdOutPath  y  $stdErrPath."
+  Write-Host "Revisa: $stdOutPath"
   throw
 }
 finally {
