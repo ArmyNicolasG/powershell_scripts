@@ -2,11 +2,12 @@
 .SYNOPSIS
   Inventario rápido con verificación de accesibilidad inmediata, salida unificada y saneo opcional de nombres.
 
-  v2.6.4:
-    - Arreglado: NO intenta renombrar si el nombre es válido.
-    - Arreglado: NO intenta renombrar si no se pudo obtener FileInfo/DirectoryInfo (evita nombres vacíos).
-    - Arreglado: manejo correcto de rutas long-path ya prefijadas (no vuelve a anteponer \\?\).
-    - Contadores y folder-info.txt precisos. Salida unificada en -LogDir.
+  v2.6.5:
+    - CSV: Type, Name, OlderName, NewName, Path, LastWriteTime, UserHasAccess, AccessStatus, AccessError (se quitó Parent).
+    - Se garantiza que Name y LastWriteTime se rellenen correctamente.
+    - OlderName/NewName solo se llenan si hubo renombre real.
+    - Creación robusta de -LogDir con Ensure-Directory.
+    - Mantiene: logs a consola/archivo, folder-info.txt, cómputo opcional de bytes, renombrado solo si el nombre es inválido, sufijos ~1, ~2...
 
 .PARAMETER Path
   Ruta raíz local o UNC desde la que se realizará el inventario.
@@ -58,17 +59,19 @@ param(
   [string]$ReplacementChar = "_"
 )
 
-# ---------- Salidas ----------
-if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
-$OutCsv  = Join-Path $LogDir 'inventory.csv'
-$LogPath = Join-Path $LogDir 'inventory.log'
-$InfoTxt = Join-Path $LogDir 'folder-info.txt'
+# ---------- Helpers básicos ----------
+function Ensure-Directory {
+  param([Parameter(Mandatory)][string]$Dir)
+  try {
+    if (-not (Test-Path -LiteralPath $Dir)) {
+      New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+    }
+    return $true
+  } catch {
+    throw "No se pudo crear/validar el directorio de salida '$Dir': $($_.Exception.Message)"
+  }
+}
 
-Remove-Item -LiteralPath $OutCsv -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $LogPath -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $InfoTxt -ErrorAction SilentlyContinue
-
-# ---------- Helpers ----------
 function Write-Log {
   param([string]$Message,[string]$Level='INFO')
   $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
@@ -88,8 +91,7 @@ function Convert-ToSystemPath {
 # Añade prefijo long-path para .NET
 function Add-LongPathPrefix {
   param([string]$SystemPath)
-  # Si YA viene con \\?\, devolver tal cual
-  if ($SystemPath -like '\\?\*') { return $SystemPath }
+  if ($SystemPath -like '\\?\*') { return $SystemPath }  # ya tiene prefijo
   if (-not $IsWindows) { return $SystemPath }
   if ($SystemPath -match '^[A-Za-z]:\\') { return "\\?\$SystemPath" }
   if ($SystemPath -like '\\*') { return "\\?\UNC\{0}" -f $SystemPath.TrimStart('\') }
@@ -131,6 +133,17 @@ function Format-DateUtcOpt {
     if ($Utc) { return $d.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
     else      { return $d.ToString('yyyy-MM-ddTHH:mm:ss.fffK') }
   } catch { return $null }
+}
+
+# Nombre base robusto (sirve para carpetas y archivos, sin depender de DirectoryInfo)
+function Get-BaseName {
+  param([Parameter(Mandatory)][string]$PathString)
+  $trimmed = [System.IO.Path]::TrimEndingDirectorySeparator($PathString)
+  $name = [System.IO.Path]::GetFileName($trimmed)
+  if ([string]::IsNullOrEmpty($name)) {
+    try { return ([System.IO.DirectoryInfo]$trimmed).Name } catch { return $trimmed }
+  }
+  return $name
 }
 
 # ---------- Validación de nombres (sin regex) ----------
@@ -198,8 +211,18 @@ function Try-RenameItem {
   }
 }
 
+# ---------- Salidas ----------
+if (-not (Ensure-Directory -Dir $LogDir)) { throw "No se pudo preparar LogDir '$LogDir'." }
+$OutCsv  = Join-Path $LogDir 'inventory.csv'
+$LogPath = Join-Path $LogDir 'inventory.log'
+$InfoTxt = Join-Path $LogDir 'folder-info.txt'
+
+Remove-Item -LiteralPath $OutCsv -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $LogPath -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $InfoTxt -ErrorAction SilentlyContinue
+
 # ---------- CSV ----------
-$csvColumns = @('Type','Name','OlderName','NewName','Path','Parent','LastWriteTime','UserHasAccess','AccessStatus','AccessError')
+$csvColumns = @('Type','Name','OlderName','NewName','Path','LastWriteTime','UserHasAccess','AccessStatus','AccessError')
 $batch   = New-Object System.Collections.Generic.List[object]
 $BATCH_SIZE = 1000
 function Flush-Batch {
@@ -276,12 +299,14 @@ while ($queue.Count -gt 0) {
 
   if ($IncludeFolders) {
     $TotalFolders++
+    $di = Get-DirInfoSafe -AnySystemPath $dirLP
+    $folderName = if ($di) { $di.Name } else { Get-BaseName -PathString $dirFriendly }
+    $folderLwt  = if ($di) { $di.LastWriteTime } else { [System.IO.Directory]::GetLastWriteTime($dirLP) }
+
     if ($SkipReparsePoints -and $isReparse) {
-      $di = Get-DirInfoSafe -AnySystemPath $dirLP
       Add-Row @{
-        Type='Folder'; Name=$di?.Name; OlderName=$null; NewName=$di?.Name;
-        Path=$dirFriendly; Parent=$di?.Parent?.FullName;
-        LastWriteTime = (Format-DateUtcOpt $di?.LastWriteTime -Utc:$Utc);
+        Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName;
+        Path=$dirFriendly; LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc);
         UserHasAccess=$false; AccessStatus='SKIPPED_REPARSE'; AccessError=$null
       }
       $InaccessibleFolders++
@@ -289,11 +314,9 @@ while ($queue.Count -gt 0) {
     }
 
     $check = Test-DirReadable -DirPathForDotNet $dirLP
-    $di = Get-DirInfoSafe -AnySystemPath $dirLP
     Add-Row @{
-      Type='Folder'; Name=$di?.Name; OlderName=$null; NewName=$di?.Name;
-      Path=$dirFriendly; Parent=$di?.Parent?.FullName;
-      LastWriteTime = (Format-DateUtcOpt $di?.LastWriteTime -Utc:$Utc);
+      Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName;
+      Path=$dirFriendly; LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc);
       UserHasAccess=$check.OK; AccessStatus=($check.OK ? 'OK' : 'DENIED'); AccessError=$check.Error
     }
     if ($check.OK) { $AccessibleFolders++ } else { $InaccessibleFolders++; Write-Log "DENIED: $dirFriendly - $($check.Error)" 'WARN'; continue }
@@ -313,11 +336,11 @@ while ($queue.Count -gt 0) {
       if (-not $attr.OK) {
         if ($IncludeFiles) {
           $TotalFiles++
+          $name  = Get-BaseName -PathString $entryFriendly
           Add-Row @{
-            Type='File'; Name=[System.IO.Path]::GetFileName($entryFriendly);
-            OlderName=$null; NewName=[System.IO.Path]::GetFileName($entryFriendly);
-            Path=$entryFriendly; Parent=[System.IO.Path]::GetDirectoryName($entryFriendly);
-            LastWriteTime = $null; UserHasAccess=$false; AccessStatus='ATTR_DENIED'; AccessError=$attr.Error
+            Type='File'; Name=$name; OlderName=$null; NewName=$name;
+            Path=$entryFriendly; LastWriteTime=$null;
+            UserHasAccess=$false; AccessStatus='ATTR_DENIED'; AccessError=$attr.Error
           }
           $InaccessibleFiles++
           Write-Log "ATTR_DENIED: $entryFriendly - $($attr.Error)" 'WARN'
@@ -330,31 +353,33 @@ while ($queue.Count -gt 0) {
 
       if ($isDir) {
         if ($IncludeFolders) {
-          if ($SanitizeNames) {
-            $cd = Get-DirInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
-            if ($cd -and -not [string]::IsNullOrEmpty($cd.Name) -and (Test-NameInvalid -Name $cd.Name -MaxLen $MaxNameLength)) {
-              $RenamedOrInvalidFolders++
-              $proposed = Build-SanitizedName -Name $cd.Name -MaxLen $MaxNameLength -ReplacementChar $ReplacementChar
-              if ($proposed -ne $cd.Name) {
-                $unique = Ensure-UniqueName -DirectoryPath $cd.Parent.FullName -Candidate $proposed -IsDirectory $true
-                $ren = Try-RenameItem -CurrentPath $cd.FullName -NewName $unique -IsDirectory $true
-                if ($ren.OK) {
-                  Write-Log "Renombrado carpeta: '$($cd.Name)' -> '$unique' en '$($cd.Parent.FullName)'"
-                  $entryFriendly = $ren.NewPath
-                  $entrySys = Convert-ToSystemPath $entryFriendly
-                } else {
-                  Write-Log "RENAME_FAILED carpeta '$($cd.Name)' (prop.: '$unique'): $($ren.Error)" 'WARN'
-                }
+          $cd = Get-DirInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
+          $childName = if ($cd) { $cd.Name } else { Get-BaseName -PathString $entryFriendly }
+          $childLwt  = if ($cd) { $cd.LastWriteTime } else { [System.IO.Directory]::GetLastWriteTime((Add-LongPathPrefix $entrySys)) }
+
+          if ($SanitizeNames -and $cd -and (Test-NameInvalid -Name $cd.Name -MaxLen $MaxNameLength)) {
+            $RenamedOrInvalidFolders++
+            $proposed = Build-SanitizedName -Name $cd.Name -MaxLen $MaxNameLength -ReplacementChar $ReplacementChar
+            if ($proposed -ne $cd.Name) {
+              $unique = Ensure-UniqueName -DirectoryPath $cd.Parent.FullName -Candidate $proposed -IsDirectory $true
+              $ren = Try-RenameItem -CurrentPath $cd.FullName -NewName $unique -IsDirectory $true
+              if ($ren.OK) {
+                Write-Log "Renombrado carpeta: '$($cd.Name)' -> '$unique' en '$($cd.Parent.FullName)'"
+                $entryFriendly = $ren.NewPath
+                $entrySys = Convert-ToSystemPath $entryFriendly
+                $cd = Get-DirInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
+                $childName = if ($cd) { $cd.Name } else { Get-BaseName -PathString $entryFriendly }
+                $childLwt  = if ($cd) { $cd.LastWriteTime } else { $childLwt }
+              } else {
+                Write-Log "RENAME_FAILED carpeta '$($cd.Name)' (prop.: '$unique'): $($ren.Error)" 'WARN'
               }
             }
           }
 
           if ($SkipReparsePoints -and $isReparseChild) {
-            $childDi = Get-DirInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
             Add-Row @{
-              Type='Folder'; Name=$childDi?.Name; OlderName=$null; NewName=$childDi?.Name;
-              Path=$entryFriendly; Parent=$childDi?.Parent?.FullName;
-              LastWriteTime = (Format-DateUtcOpt $childDi?.LastWriteTime -Utc:$Utc);
+              Type='Folder'; Name=$childName; OlderName=$null; NewName=$childName;
+              Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $childLwt -Utc:$Utc);
               UserHasAccess=$false; AccessStatus='SKIPPED_REPARSE'; AccessError=$null
             }
             $TotalFolders++; $InaccessibleFolders++
@@ -366,45 +391,39 @@ while ($queue.Count -gt 0) {
         if ($IncludeFiles) {
           $TotalFiles++
           $fi = Get-FileInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
-          if ($fi) {
-            $oldName = $fi.Name
-            $newName = $oldName
-            $nameWasInvalid = $false
+          $fileName   = if ($fi) { $fi.Name } else { Get-BaseName -PathString $entryFriendly }
+          $fileLwt    = if ($fi) { $fi.LastWriteTime } else { [System.IO.File]::GetLastWriteTime((Add-LongPathPrefix $entrySys)) }
+          $olderName  = $null
+          $newerName  = $fileName
+          $wasInvalid = $false
 
-            if ($SanitizeNames -and (Test-NameInvalid -Name $oldName -MaxLen $MaxNameLength)) {
-              $nameWasInvalid = $true
-              $proposed = Build-SanitizedName -Name $oldName -MaxLen $MaxNameLength -ReplacementChar $ReplacementChar
-              if ($proposed -ne $oldName) {
-                $unique = Ensure-UniqueName -DirectoryPath $fi.DirectoryName -Candidate $proposed -IsDirectory $false
-                $ren = Try-RenameItem -CurrentPath $fi.FullName -NewName $unique -IsDirectory $false
-                if ($ren.OK) {
-                  Write-Log "Renombrado archivo: '$oldName' -> '$unique' en '$($fi.DirectoryName)'"
-                  $entryFriendly = $ren.NewPath
-                  $fi = Get-FileInfoSafe -AnySystemPath (Add-LongPathPrefix (Convert-ToSystemPath $entryFriendly))
-                  $newName = $fi?.Name
-                } else {
-                  Write-Log "RENAME_FAILED archivo '$oldName' (prop.: '$unique'): $($ren.Error)" 'WARN'
-                }
+          if ($fi -and $SanitizeNames -and (Test-NameInvalid -Name $fi.Name -MaxLen $MaxNameLength)) {
+            $wasInvalid = $true
+            $proposed = Build-SanitizedName -Name $fi.Name -MaxLen $MaxNameLength -ReplacementChar $ReplacementChar
+            if ($proposed -ne $fi.Name) {
+              $unique = Ensure-UniqueName -DirectoryPath $fi.DirectoryName -Candidate $proposed -IsDirectory $false
+              $ren = Try-RenameItem -CurrentPath $fi.FullName -NewName $unique -IsDirectory $false
+              if ($ren.OK) {
+                Write-Log "Renombrado archivo: '$($fi.Name)' -> '$unique' en '$($fi.DirectoryName)'"
+                $olderName = $fi.Name
+                $entryFriendly = $ren.NewPath
+                $fi = Get-FileInfoSafe -AnySystemPath (Add-LongPathPrefix (Convert-ToSystemPath $entryFriendly))
+                $fileName  = if ($fi) { $fi.Name } else { Get-BaseName -PathString $entryFriendly }
+                $newerName = $fileName
+                $fileLwt   = if ($fi) { $fi.LastWriteTime } else { $fileLwt }
+              } else {
+                Write-Log "RENAME_FAILED archivo '$($fi.Name)' (prop.: '$unique'): $($ren.Error)" 'WARN'
               }
             }
+          }
 
-            if ($ComputeRootSize) { $TotalBytes += [int64]$fi.Length }
-            $AccessibleFiles++
-            if ($nameWasInvalid) { $RenamedOrInvalidFiles++ }
-            Add-Row @{
-              Type='File'; Name=$fi?.Name; OlderName=($(if ($newName -ne $oldName) { $oldName } else { $null }));
-              NewName=$newName; Path=$entryFriendly; Parent=$fi?.DirectoryName;
-              LastWriteTime = (Format-DateUtcOpt $fi?.LastWriteTime -Utc:$Utc);
-              UserHasAccess=$true; AccessStatus='OK'; AccessError=$null
-            }
-          } else {
-            $InaccessibleFiles++
-            Add-Row @{
-              Type='File'; Name=[System.IO.Path]::GetFileName($entryFriendly);
-              OlderName=$null; NewName=[System.IO.Path]::GetFileName($entryFriendly);
-              Path=$entryFriendly; Parent=[System.IO.Path]::GetDirectoryName($entryFriendly);
-              LastWriteTime = $null; UserHasAccess=$false; AccessStatus='ATTR_DENIED'; AccessError='Unknown'
-            }
+          if ($fi -and $ComputeRootSize) { $TotalBytes += [int64]$fi.Length }
+          $AccessibleFiles++
+          if ($wasInvalid) { $RenamedOrInvalidFiles++ }
+          Add-Row @{
+            Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName;
+            Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
+            UserHasAccess=$true; AccessStatus='OK'; AccessError=$null
           }
         }
       }
@@ -412,10 +431,11 @@ while ($queue.Count -gt 0) {
   } catch {
     if ($IncludeFolders) {
       $di = Get-DirInfoSafe -AnySystemPath $dirLP
+      $folderName = if ($di) { $di.Name } else { Get-BaseName -PathString $dirFriendly }
+      $folderLwt  = if ($di) { $di.LastWriteTime } else { [System.IO.Directory]::GetLastWriteTime($dirLP) }
       Add-Row @{
-        Type='Folder'; Name=$di?.Name; OlderName=$null; NewName=$di?.Name;
-        Path=$dirFriendly; Parent=$di?.Parent?.FullName;
-        LastWriteTime = (Format-DateUtcOpt $di?.LastWriteTime -Utc:$Utc);
+        Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName;
+        Path=$dirFriendly; LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc);
         UserHasAccess=$false; AccessStatus='ENUMERATION_ERROR'; AccessError=$_.Exception.Message
       }
       $InaccessibleFolders++
@@ -443,3 +463,9 @@ $report.Add(("Timestamp: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')))  |
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllLines($InfoTxt, $report, $utf8NoBom)
 foreach ($line in $report) { Write-Log $line }
+
+Write-Log "Inventario completado."
+Write-Log "CSV  -> $OutCsv"
+Write-Log "LOG  -> $LogPath"
+Write-Log "INFO -> $InfoTxt"
+if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
