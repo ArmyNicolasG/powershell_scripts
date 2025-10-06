@@ -441,24 +441,28 @@ while ($queue.Count -gt 0) {
 }
 
 Flush-Batch
-
-# ---------- Folder info (contadores y tamaño total si se pidió) ----------
-$lines = @(
-  "RootPath: {0}" -f $friendlyRoot,
-  "TotalFolders: {0}" -f $TotalFolders,
-  "TotalFiles: {0}" -f $TotalFiles,
-  "AccessibleFolders: {0}" -f $AccessibleFolders,
-  "InaccessibleFolders: {0}" -f $InaccessibleFolders,
-  "AccessibleFiles: {0}" -f $AccessibleFiles,
-  "InaccessibleFiles: {0}" -f $InaccessibleFiles,
-  "RenamedOrInvalidFolders: {0}" -f $RenamedOrInvalidFolders,
-  "RenamedOrInvalidFiles: {0}" -f $RenamedOrInvalidFiles
-)
+# ---------- reportes ----------
+$report = New-Object System.Collections.Generic.List[string]
+$report.Add(("RootPath: {0}" -f $friendlyRoot))            | Out-Null
+$report.Add(("TotalFolders: {0}" -f $TotalFolders))         | Out-Null
+$report.Add(("TotalFiles: {0}" -f $TotalFiles))             | Out-Null
+$report.Add(("AccessibleFolders: {0}" -f $AccessibleFolders))   | Out-Null
+$report.Add(("InaccessibleFolders: {0}" -f $InaccessibleFolders)) | Out-Null
+$report.Add(("AccessibleFiles: {0}" -f $AccessibleFiles))       | Out-Null
+$report.Add(("InaccessibleFiles: {0}" -f $InaccessibleFiles))   | Out-Null
+$report.Add(("RenamedOrInvalidFolders: {0}" -f $RenamedOrInvalidFolders)) | Out-Null
+$report.Add(("RenamedOrInvalidFiles: {0}" -f $RenamedOrInvalidFiles))     | Out-Null
 if ($ComputeRootSize) {
-  $lines += "TotalBytes: {0}" -f $TotalBytes
+  $report.Add(("TotalBytes: {0}" -f $TotalBytes))           | Out-Null
 }
-$lines += "Timestamp: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-$lines | Set-Content -LiteralPath $InfoTxt -Encoding UTF8
+$report.Add(("Timestamp: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))) | Out-Null
+
+# Escribe al TXT con UTF-8 (sin BOM) y una línea por entrada
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllLines($InfoTxt, $report, $utf8NoBom)
+
+# También manda el resumen al log/console
+foreach ($line in $report) { Write-Log $line }
 
 Write-Log "Inventario completado."
 Write-Log "CSV  -> $OutCsv"
