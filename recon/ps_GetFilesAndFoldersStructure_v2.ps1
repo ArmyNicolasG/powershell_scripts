@@ -1,23 +1,26 @@
 <#
 .SYNOPSIS
   Inventario con verificación de accesibilidad inmediata, salida unificada y saneo opcional de nombres.
-  v2.6.6 (hotfix logging server):
-    - Logging robusto: StreamWriter Append + FileShare.ReadWrite + reintentos.
-    - No se borra el .log al inicio (evita carrera con AV/EDR).
-    - LogDir se crea con Directory.CreateDirectory (soporta long-path).
-    - Mantiene: columnas CSV, saneo solo si inválido, folder-info.txt, ComputeRootSize.
 
-.PARAMETER Path              Ruta raíz a inventariar.
-.PARAMETER LogDir            Carpeta local de salida (CSV, LOG, TXT).
-.PARAMETER Depth             Profundidad (−1 ilimitado).
-.PARAMETER IncludeFiles      Incluir archivos (por defecto).
-.PARAMETER IncludeFolders    Incluir carpetas (por defecto).
-.PARAMETER SkipReparsePoints Saltar reparse points (por defecto).
-.PARAMETER Utc               Fechas en UTC.
-.PARAMETER ComputeRootSize   Suma de bytes del árbol (si se indica).
+  v2.6.7 (server-safe IO):
+    - LogDir se crea con Directory.CreateDirectory (long-path).
+    - LOG y CSV se escriben con StreamWriter (Append) + FileShare.ReadWrite + reintentos (sin Export-Csv).
+    - Preflight de escritura en -LogDir (Test-CanWrite).
+    - Columnas: Type, Name, OlderName, NewName, Path, LastWriteTime, UserHasAccess, AccessStatus, AccessError.
+    - Saneo solo si el NOMBRE es inválido; OlderName/NewName se rellenan cuando hay renombre real.
+    - folder-info.txt con contadores y TotalBytes (si -ComputeRootSize).
+
+.PARAMETER Path              Raíz a inventariar (local o UNC).
+.PARAMETER LogDir            Carpeta local para outputs (CSV, LOG, TXT).
+.PARAMETER Depth             Profundidad máxima (−1 ilimitado; 0 solo raíz).
+.PARAMETER IncludeFiles      Incluir archivos (default).
+.PARAMETER IncludeFolders    Incluir carpetas (default).
+.PARAMETER SkipReparsePoints Saltar reparse points (default).
+.PARAMETER Utc               Emite fechas en UTC; si no, locales.
+.PARAMETER ComputeRootSize   Suma de bytes de todos los archivos bajo la raíz.
 .PARAMETER SanitizeNames     Sanea/renombra SOLO si el nombre es inválido.
-.PARAMETER MaxNameLength     Longitud máxima del NOMBRE (no ruta), por defecto 255.
-.PARAMETER ReplacementChar   Carácter de reemplazo, por defecto "_".
+.PARAMETER MaxNameLength     Longitud máxima de NOMBRE (no ruta), por defecto 255.
+.PARAMETER ReplacementChar   Carácter de reemplazo para inválidos, por defecto "_".
 #>
 
 [CmdletBinding()]
@@ -55,6 +58,21 @@ function Ensure-Directory {
   [void][System.IO.Directory]::CreateDirectory($lp)
   return $true
 }
+function Test-CanWrite {
+  param([string]$Dir)
+  try {
+    $lpDir = Add-LongPathPrefix (Convert-ToSystemPath $Dir)
+    [void][System.IO.Directory]::CreateDirectory($lpDir)
+    $probe = Join-Path $Dir ('.write_probe_{0}.tmp' -f [guid]::NewGuid())
+    $lp = Add-LongPathPrefix (Convert-ToSystemPath $probe)
+    $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::CreateNew,
+                                 [System.IO.FileAccess]::Write,
+                                 [System.IO.FileShare]::ReadWrite)
+    $fs.Dispose()
+    Remove-Item -LiteralPath $probe -ErrorAction SilentlyContinue
+    return $true
+  } catch { return $false }
+}
 
 # ---------- Rutas de salida ----------
 if (-not (Ensure-Directory -Dir $LogDir)) { throw "No se pudo preparar LogDir '$LogDir'." }
@@ -62,7 +80,7 @@ $OutCsv  = Join-Path $LogDir 'inventory.csv'
 $LogPath = Join-Path $LogDir 'inventory.log'
 $InfoTxt = Join-Path $LogDir 'folder-info.txt'
 
-# No borramos el .log (evita "access denied" si está monitoreado por AV/EDR)
+# - No borramos el .log (evita "access denied" si EDR/AV lo engancha)
 Remove-Item -LiteralPath $OutCsv -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $InfoTxt -ErrorAction SilentlyContinue
 
@@ -75,7 +93,7 @@ function Write-Log {
   try {
     $lp = Add-LongPathPrefix (Convert-ToSystemPath $LogPath)
     [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
-    $max = 4
+    $max = 5
     for($i=1; $i -le $max; $i++){
       try {
         $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
@@ -86,8 +104,25 @@ function Write-Log {
         else { Start-Sleep -Milliseconds (100 * $i * $i) }
       }
     }
-  } catch {
-    Write-Host "[$ts][WARN] Logging deshabilitado temporalmente: $($_.Exception.Message)"
+  } catch { Write-Host "[$ts][WARN] Logging deshabilitado: $($_.Exception.Message)" }
+}
+
+# ---------- Utilidades CSV/fechas/attrs ----------
+function Write-LinesWithRetry {
+  param([string]$Path,[string[]]$Lines)
+  $lp = Add-LongPathPrefix (Convert-ToSystemPath $Path)
+  [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+  $max = 5
+  for($i=1; $i -le $max; $i++){
+    try {
+      $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+      $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($false))
+      foreach($l in $Lines){ $sw.WriteLine($l) }
+      $sw.Dispose(); $fs.Dispose(); return
+    } catch {
+      if ($i -eq $max) { throw }
+      Start-Sleep -Milliseconds (100 * $i * $i)
+    }
   }
 }
 
@@ -153,12 +188,34 @@ function Try-RenameItem { param([string]$CurrentPath,[string]$NewName,[bool]$IsD
 
 # ---------- CSV ----------
 $csvColumns = @('Type','Name','OlderName','NewName','Path','LastWriteTime','UserHasAccess','AccessStatus','AccessError')
-$batch = New-Object System.Collections.Generic.List[object]; $BATCH_SIZE=1000
-function Flush-Batch { if($batch.Count -eq 0){return}; $exists=Test-Path -LiteralPath $OutCsv; $batch | Select-Object -Property $csvColumns | Export-Csv -LiteralPath $OutCsv -Append:$exists -NoTypeInformation -Encoding utf8; $batch.Clear() }
-function Add-Row { param([hashtable]$Row); $o=[ordered]@{}; foreach($c in $csvColumns){$o[$c]= $(if($Row.ContainsKey($c)){$Row[$c]}else{$null})}; $batch.Add([pscustomobject]$o)|Out-Null; if($batch.Count -ge $BATCH_SIZE){Flush-Batch} }
+$batch = New-Object System.Collections.Generic.List[object]
+$BATCH_SIZE=1000
+
+# Inicializa el CSV con cabecera
+Write-LinesWithRetry -Path $OutCsv -Lines @(($csvColumns -join ','))
+
+function Flush-Batch {
+  if ($batch.Count -eq 0) { return }
+  $lines = $batch | Select-Object -Property $csvColumns | ConvertTo-Csv -NoTypeInformation
+  if ($lines.Count -gt 0) { $lines = $lines[1..($lines.Count-1)] } # descarta la cabecera que añade ConvertTo-Csv
+  Write-LinesWithRetry -Path $OutCsv -Lines $lines
+  $batch.Clear()
+}
+function Add-Row {
+  param([hashtable]$Row)
+  $o=[ordered]@{}
+  foreach($c in $csvColumns){ $o[$c] = $(if($Row.ContainsKey($c)){$Row[$c]}else{$null}) }
+  $batch.Add([pscustomobject]$o)|Out-Null
+  if($batch.Count -ge $BATCH_SIZE){ Flush-Batch }
+}
 
 # ---------- Contadores ----------
 [int]$TotalFolders=0; [int]$TotalFiles=0; [int]$AccessibleFolders=0; [int]$InaccessibleFolders=0; [int]$AccessibleFiles=0; [int]$InaccessibleFiles=0; [int]$RenamedOrInvalidFolders=0; [int]$RenamedOrInvalidFiles=0; [long]$TotalBytes=0
+
+# Preflight de escritura
+if (-not (Test-CanWrite -Dir $LogDir)) {
+  Write-Host "[WARN] La cuenta actual no puede escribir en $LogDir. Considera usar un -LogDir en D:\logs o ajustar ACL/Defender."
+}
 
 # ---------- Main ----------
 $friendlyRoot = Convert-ToSystemPath -AnyPath $Path
