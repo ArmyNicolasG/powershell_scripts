@@ -1,235 +1,235 @@
 <#
 .SYNOPSIS
-  AzCopy wrapper (compat) que mantiene parámetros separados:
-  -StorageAccount, -ShareName, -DestSubPath, -Sas
-  y añade logging a consola/archivo + CSV por-archivo + inventario remoto opcional.
-
-.DESCRIPTION
-  - Construye internamente el DestUrl conservando tu forma actual de invocación.
-  - Muestra la salida de AzCopy en consola **y** la captura para procesar.
-  - Genera CSV local con los estados de cada transferencia (jobs show).
-  - (Opcional) Genera inventario remoto del File Share (azcopy list).
-  - Soporta -AzCopyPath para usar una ruta específica del ejecutable.
-  - Soporta -PreservePermissions (mapea a --preserve-smb-permissions y --preserve-smb-info).
+  Subida a Azure (File Share o Blob) con logs rotativos y resumen legible de AzCopy.
+  Mantiene la forma de conexión por partes: -StorageAccount, -ShareName, -DestSubPath, -Sas.
 
 .PARAMETER SourceRoot
-  Carpeta local origen.
+  Carpeta local origen (puede ser UNC).
 
 .PARAMETER StorageAccount
-  Nombre de la cuenta de almacenamiento (ej. itvstoragedisc...prd001).
+  Nombre de la cuenta (ej. itvstoragediscoxprd001).
 
 .PARAMETER ShareName
-  Nombre del File Share (ej. 'disco-x').
+  Nombre del File Share o del contenedor (según ServiceType).
 
 .PARAMETER DestSubPath
-  Subcarpeta destino dentro del share (ej. '/1CONTABILIDAD/ESTADOS FINANCIEROS'). Puede ir con o sin '/' inicial.
+  Subcarpeta/ruta destino dentro del share o contenedor (con o sin '/' inicial).
 
 .PARAMETER Sas
-  Token SAS que inicia con '?' o sin él (se ajusta automáticamente).
+  Token SAS (con o sin '?').
 
-.PARAMETER OutCsv
-  CSV por-archivo (local). Default: .\resultado_azcopy.csv
+.PARAMETER ServiceType
+  'FileShare' (default) o 'Blob'. Ajusta flags como preserve-smb-*.
 
 .PARAMETER LogDir
-  Carpeta para logs **nativos** de AzCopy (AZCOPY_LOG_LOCATION).
-
-.PARAMETER WrapperLog
-  Archivo .log adicional del wrapper (mensajes de alto nivel).
-
-.PARAMETER Overwrite
-  'ifSourceNewer' (default), 'true', 'false' (append-only: sólo nuevos).
-
-.PARAMETER IncludePaths
-  Subconjunto de rutas relativas a incluir (usa --include-path).
+  Carpeta única para TODOS los outputs. Se crea si no existe.
+  - upload-logs-#.txt (logs del wrapper con rotación)
+  - azcopy\* (logs nativos de AzCopy vía AZCOPY_LOG_LOCATION)
 
 .PARAMETER AzCopyPath
-  Ruta a azcopy.exe si no está en PATH.
+  Ruta a azcopy.exe (si no, usa 'azcopy' del PATH).
+
+.PARAMETER Overwrite
+  'ifSourceNewer' (default), 'true', 'false' (append-only) o 'prompt'.
+
+.PARAMETER IncludePaths
+  Lista de rutas relativas a incluir (mapeadas a --include-path "a;b;c").
 
 .PARAMETER PreservePermissions
-  Si se indica, añade --preserve-smb-permissions=true --preserve-smb-info=true
+  Solo aplica a FileShare: añade --preserve-smb-permissions=true --preserve-smb-info=true
 
-.PARAMETER GenerateRemoteInventory
-  Genera *.remote.csv con `azcopy list --recursive --output-type json`.
+.PARAMETER MaxLogSizeMB
+  Tamaño máximo por archivo de log rotativo (default 8 MB).
 
 .EXAMPLE
-  .\ps_UploadToFileShareFromCsv_v2.4_compat.ps1 `
+  .\ps_UploadToFileShareFromCsv_vNext.ps1 `
     -SourceRoot "\\192.168.98.19\UnidadX\1CONTABILIDAD\ESTADOS FINANCIEROS" `
     -StorageAccount "itvstoragediscoxprd001" -ShareName "disco-x" -DestSubPath "/1CONTABILIDAD" `
-    -Sas "?sv=..." -AzCopyPath "C:\Tools\azcopy.exe" -PreservePermissions `
-    -OutCsv "D:\Migracion\resultado.csv" -LogDir "D:\Migracion\logs\AzCopy" -WrapperLog "D:\Migracion\logs\wrapper.log" `
-    -Overwrite ifSourceNewer -GenerateRemoteInventory
+    -Sas "?sv=..." -ServiceType FileShare -PreservePermissions `
+    -AzCopyPath "C:\Tools\azcopy.exe" -LogDir "D:\logs\migracion\contabilidad"
+
+.EXAMPLE
+  .\ps_UploadToFileShareFromCsv_vNext.ps1 `
+    -SourceRoot "D:\export" `
+    -StorageAccount "miacct" -ShareName "backups" -DestSubPath "/2025" `
+    -Sas "sv=..." -ServiceType Blob `
+    -LogDir "D:\logs\migracion\backup-blob"
 #>
 
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory)] [string]$SourceRoot,
-  [Parameter(Mandatory)] [string]$StorageAccount,
-  [Parameter(Mandatory)] [string]$ShareName,
-  [Parameter(Mandatory)] [string]$DestSubPath,
-  [Parameter(Mandatory)] [string]$Sas,
-  [string]$OutCsv = ".\resultado_azcopy.csv",
-  [string]$LogDir,
-  [string]$WrapperLog,
-  [ValidateSet('ifSourceNewer','true','false')][string]$Overwrite = 'ifSourceNewer',
+  [Parameter(Mandatory)][string]$SourceRoot,
+  [Parameter(Mandatory)][string]$StorageAccount,
+  [Parameter(Mandatory)][string]$ShareName,
+  [Parameter(Mandatory)][string]$DestSubPath,
+  [Parameter(Mandatory)][string]$Sas,
+
+  [ValidateSet('FileShare','Blob')][string]$ServiceType = 'FileShare',
+  [ValidateSet('ifSourceNewer','true','false','prompt')][string]$Overwrite = 'ifSourceNewer',
   [string[]]$IncludePaths,
-  [string]$AzCopyPath,
+  [string]$AzCopyPath = 'azcopy',
   [switch]$PreservePermissions,
-  [switch]$GenerateRemoteInventory
+  [Parameter(Mandatory)][string]$LogDir,
+  [int]$MaxLogSizeMB = 8
 )
 
-# ---------- Helpers ----------
+# ---------- Helpers base ----------
+function Convert-ToSystemPath {
+  param([string]$AnyPath)
+  try { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AnyPath) }
+  catch { $AnyPath -replace '^Microsoft\.PowerShell\.Core\\FileSystem::','' }
+}
+function Add-LongPathPrefix {
+  param([string]$SystemPath)
+  if ($SystemPath -like '\\?\*') { return $SystemPath }
+  if (-not $IsWindows) { return $SystemPath }
+  if ($SystemPath -match '^[A-Za-z]:\\') { return "\\?\$SystemPath" }
+  if ($SystemPath -like '\\*') { return "\\?\UNC\{0}" -f $SystemPath.TrimStart('\') }
+  $SystemPath
+}
+function Ensure-Directory {
+  param([string]$Dir)
+  $lp = Add-LongPathPrefix (Convert-ToSystemPath $Dir)
+  [void][System.IO.Directory]::CreateDirectory($lp)
+}
+
+# ---------- Logger rotativo (consola + archivo) ----------
+$LogPrefix = Join-Path $LogDir 'upload-logs'
+$script:LogIndex = 1
+$script:LogPath  = "{0}-{1}.txt" -f $LogPrefix, $script:LogIndex
+$MaxBytes = [int64]$MaxLogSizeMB * 1MB
+Ensure-Directory -Dir $LogDir
+
+function Open-NewLog {
+  $script:LogIndex++
+  $script:LogPath = "{0}-{1}.txt" -f $LogPrefix, $script:LogIndex
+}
 function Write-Log {
   param([string]$Message,[string]$Level='INFO')
   $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
   $line = "[$ts][$Level] $Message"
+  # consola
   Write-Host $line
-  if ($WrapperLog) { Add-Content -LiteralPath $WrapperLog -Value $line -Encoding UTF8 }
+  # archivo con rotación por tamaño y FileShare RW
+  $lp = Add-LongPathPrefix (Convert-ToSystemPath $script:LogPath)
+  [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+  $max = 4
+  for($i=1;$i -le $max;$i++){
+    try {
+      if (Test-Path -LiteralPath $script:LogPath) {
+        $len = (Get-Item -LiteralPath $script:LogPath).Length
+        if ($len -ge $MaxBytes) { Open-NewLog }
+      }
+      $lp = Add-LongPathPrefix (Convert-ToSystemPath $script:LogPath)
+      $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+      $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($true))
+      $sw.WriteLine($line); $sw.Dispose(); $fs.Dispose(); break
+    } catch {
+      if ($i -eq $max) { Write-Host "[$ts][WARN] No se pudo escribir log: $($_.Exception.Message)" }
+      else { Start-Sleep -Milliseconds (100 * $i * $i) }
+    }
+  }
 }
 
+# ---------- Construcción de URL destino manteniendo tu estilo ----------
 function Build-DestUrl {
-  param([string]$StorageAccount,[string]$ShareName,[string]$DestSubPath,[string]$Sas)
+  param([string]$StorageAccount,[string]$ShareName,[string]$DestSubPath,[string]$Sas,[string]$ServiceType)
   $sub = $DestSubPath
   if ([string]::IsNullOrWhiteSpace($sub)) { $sub = "" }
   $sub = $sub -replace '\\','/'
   if ($sub -and -not $sub.StartsWith('/')) { $sub = '/' + $sub }
   $sasT = $Sas.Trim()
   if (-not $sasT.StartsWith('?')) { $sasT = '?' + $sasT }
-  return "https://$StorageAccount.file.core.windows.net/$ShareName$sub$sasT"
-}
 
-function Get-AzCopyExe {
-  param([string]$AzCopyPath)
-  if ($AzCopyPath) {
-    return $AzCopyPath
+  if ($ServiceType -eq 'Blob') {
+    # El nombre "ShareName" se usa como contenedor
+    return "https://$StorageAccount.blob.core.windows.net/$ShareName$sub$sasT"
+  } else {
+    return "https://$StorageAccount.file.core.windows.net/$ShareName$sub$sasT"
   }
-  return "azcopy"
 }
 
-# CSV schema
-$csvColumns = @('JobId','RelativePath','EntityType','Status','Bytes','LastModified','Error')
-if (Test-Path -LiteralPath $OutCsv) {
-  try {
-    $header = Get-Content -LiteralPath $OutCsv -First 1 -ErrorAction Stop
-    if ($header -and ($header -notmatch '^#TYPE')) {
-      $existing = $header -split ',' | ForEach-Object { $_.Trim('"') }
-      if ($existing.Count -gt 1) { $csvColumns = $existing }
-    }
-  } catch { }
-}
+# ---------- Preparación de entorno ----------
+Ensure-Directory -Dir $LogDir
+$AzNative = Join-Path $LogDir 'azcopy'
+Ensure-Directory -Dir $AzNative
+$env:AZCOPY_LOG_LOCATION = $AzNative
 
-function Export-Transfers {
-  param([System.Collections.Generic.List[object]]$Rows,[string]$OutCsv)
-  $Rows | Select-Object -Property $csvColumns | Export-Csv -LiteralPath $OutCsv -NoTypeInformation -Encoding UTF8
-  Write-Log "CSV de transfers -> $OutCsv"
-}
+$src = Convert-ToSystemPath $SourceRoot
+$destUrl = Build-DestUrl -StorageAccount $StorageAccount -ShareName $ShareName -DestSubPath $DestSubPath -Sas $Sas -ServiceType $ServiceType
 
-function Export-RemoteInventory {
-  param([string]$DestUrl,[string]$OutCsv,[string]$AzCopyExe)
-  Write-Log "Generando inventario remoto (azcopy list)."
-  $lines = & $AzCopyExe list $DestUrl --recursive --output-type json 2>&1 | Tee-Object -Variable listRaw
-  $rows = New-Object System.Collections.Generic.List[object]
-  foreach ($ln in $listRaw) {
-    try {
-      if ([string]::IsNullOrWhiteSpace($ln)) { continue }
-      $o = $ln | ConvertFrom-Json -ErrorAction Stop
-      $rows.Add([pscustomobject]@{
-        Path         = $o.path ?? $o.name ?? $o.Path ?? $null
-        EntityType   = $o.entityType ?? $o.EntityType ?? $null
-        Bytes        = $o.contentLength ?? $o.ContentLength ?? $null
-        LastModified = $o.lastModified ?? $o.LastModified ?? $null
-      }) | Out-Null
-    } catch { }
-  }
-  $rows | Export-Csv -LiteralPath $OutCsv -NoTypeInformation -Encoding UTF8
-  Write-Log "Inventario remoto -> $OutCsv"
-}
+# ---------- Comando AzCopy ----------
+$az = $AzCopyPath
+$args = @('copy', $src, $destUrl, '--recursive=true', "--overwrite=$Overwrite", '--output-type','json','--output-level','essential','--log-level','INFO')
 
-# ---------- Main ----------
-$destUrl = Build-DestUrl -StorageAccount $StorageAccount -ShareName $ShareName -DestSubPath $DestSubPath -Sas $Sas
-$az = Get-AzCopyExe -AzCopyPath $AzCopyPath
-
-if ($LogDir) { $env:AZCOPY_LOG_LOCATION = $LogDir }
-
-$args = @('copy', $SourceRoot, $destUrl, '--recursive=true', "--overwrite=$Overwrite", '--output-type', 'json', '--output-level','essential','--log-level','INFO')
 if ($IncludePaths -and $IncludePaths.Count -gt 0) {
   $inc = ($IncludePaths -join ';')
   $args += @('--include-path', $inc)
 }
-if ($PreservePermissions) {
+
+if ($ServiceType -eq 'FileShare' -and $PreservePermissions) {
   $args += @('--preserve-smb-permissions=true','--preserve-smb-info=true')
 }
 
+Write-Log "Destino: $destUrl"
 Write-Log ("Ejecutando: {0} {1}" -f $az, ($args -join ' '))
 
-# Mostrar en consola y capturar salida
+# ---------- Ejecución y captura ----------
 $outLines = @()
-& $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object { $_ } | Out-Host
+& $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object {
+  # Mostrar cada línea cruda también en log para auditoría
+  try { Write-Log $_ 'AZCOPY' } catch {}
+} | Out-Null
+
 if ($LASTEXITCODE -ne 0) {
   Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN'
 }
 
-# Guardar salida cruda para auditoría (local)
-$jsonlPath = Join-Path -Path (Resolve-Path '.\').Path -ChildPath ("azcopy_{0:yyyyMMddHHmmss}.jsonl" -f (Get-Date))
-$outLines | Set-Content -LiteralPath $jsonlPath -Encoding UTF8
-Write-Log "Salida JSONL -> $jsonlPath"
+# ---------- Resumen legible (a partir del JSON de azcopy) ----------
+# Buscar el bloque "EndOfJob" / "CompleteJobOrdered" en la salida JSONL
+$summary = @{
+  JobID = $null; Status=$null; TotalTransfers=$null; TransfersCompleted=$null; TransfersFailed=$null; TransfersSkipped=$null;
+  BytesEnumerated=$null; BytesTransferred=$null; ElapsedSeconds=$null; FilesScanned=$null; FoldersScanned=$null
+}
 
-# Extraer JobId
-$jobId = $null
 foreach ($line in $outLines) {
   try {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
-    $obj = $line | ConvertFrom-Json -ErrorAction Stop
-    if ($obj.jobId) { $jobId = $obj.jobId; break }
-    if ($obj.JobId) { $jobId = $obj.JobId; break }
+    $o = $line | ConvertFrom-Json -ErrorAction Stop
+
+    if ($null -ne $o.JobID) { $summary.JobID = $o.JobID }
+    if ($o.MessageType -eq 'EndOfJob' -or $o.MessageType -eq 'CompleteJobOrdered') {
+      $m = $o.MessageContent
+      if ($m) {
+        # AzCopy suele devolver propiedades con estos nombres (varían por versión)
+        $summary.Status              = $m.JobStatus            ?? $summary.Status
+        $summary.TotalTransfers      = $m.TotalTransfers       ?? $summary.TotalTransfers
+        $summary.TransfersCompleted  = $m.TransfersCompleted   ?? $summary.TransfersCompleted
+        $summary.TransfersFailed     = $m.TransfersFailed      ?? $summary.TransfersFailed
+        $summary.TransfersSkipped    = $m.TransfersSkipped     ?? $summary.TransfersSkipped
+        $summary.BytesEnumerated     = $m.TotalBytesEnumerated ?? $m.BytesEnumerated ?? $summary.BytesEnumerated
+        $summary.BytesTransferred    = $m.BytesOverWire        ?? $m.TotalBytesTransferred ?? $summary.BytesTransferred
+        $summary.ElapsedSeconds      = $m.ElapsedTimeInMs      ? [math]::Round($m.ElapsedTimeInMs/1000,2) : $summary.ElapsedSeconds
+        $summary.FilesScanned        = $m.FileTransfers        ?? $summary.FilesScanned
+        $summary.FoldersScanned      = $m.FolderPropertyTransfers ?? $summary.FoldersScanned
+      }
+    }
   } catch { continue }
 }
-if (-not $jobId) {
-  Write-Log "No se detectó JobId en salida; intentaré 'azcopy jobs list'." 'WARN'
-  $jobsLines = & $az jobs list --output-type json 2>&1 | Tee-Object -Variable jobsRaw
-  foreach ($j in $jobsRaw) {
-    try { $o = $j | ConvertFrom-Json -ErrorAction Stop; if ($o.jobId) { $jobId = $o.jobId; break } } catch {}
-  }
-}
 
-if ($jobId) {
-  Write-Log "JobId detectado: $jobId"
-  $lines = & $az jobs show $jobId --with-status=All --output-type json 2>&1 | Tee-Object -Variable jobShowRaw
-  $rows = New-Object System.Collections.Generic.List[object]
+Write-Log "===================== RESUMEN DE AZCOPY =====================" 'INFO'
+if ($summary.JobID)              { Write-Log ("JobID:             {0}" -f $summary.JobID) }
+if ($summary.Status)             { Write-Log ("Estado:            {0}" -f $summary.Status) }
+if ($summary.TotalTransfers)     { Write-Log ("Total transfers:   {0}" -f $summary.TotalTransfers) }
+if ($summary.TransfersCompleted) { Write-Log ("Completados:       {0}" -f $summary.TransfersCompleted) }
+if ($summary.TransfersFailed)    { Write-Log ("Fallidos:          {0}" -f $summary.TransfersFailed) }
+if ($summary.TransfersSkipped)   { Write-Log ("Saltados:          {0}" -f $summary.TransfersSkipped) }
+if ($summary.FilesScanned)       { Write-Log ("Archivos tratados: {0}" -f $summary.FilesScanned) }
+if ($summary.FoldersScanned)     { Write-Log ("Carpetas tratadas: {0}" -f $summary.FoldersScanned) }
+if ($summary.BytesEnumerated)    { Write-Log ("Bytes enumerados:  {0}" -f $summary.BytesEnumerated) }
+if ($summary.BytesTransferred)   { Write-Log ("Bytes enviados:    {0}" -f $summary.BytesTransferred) }
+if ($summary.ElapsedSeconds)     { Write-Log ("Duración (s):      {0}" -f $summary.ElapsedSeconds) }
+Write-Log "==============================================================" 'INFO'
 
-  foreach ($ln in $jobShowRaw) {
-    try {
-      if ([string]::IsNullOrWhiteSpace($ln)) { continue }
-      $o = $ln | ConvertFrom-Json -ErrorAction Stop
-
-      $path   = $o.path   ?? $o.Path   ?? $o.Destination ?? $o.Source ?? $null
-      $status = $o.status ?? $o.Status ?? $o.TransferStatus ?? $null
-      $etype  = $o.entityType ?? $o.EntityType ?? $null
-      $bytes  = $o.contentLength ?? $o.Size ?? $null
-      $lm     = $o.lastModified ?? $null
-      $err    = $o.errorMsg ?? $o.ErrorMsg ?? $o.Error ?? $null
-
-      $rows.Add([pscustomobject]@{
-        JobId        = $jobId
-        RelativePath = $path
-        EntityType   = $etype
-        Status       = $status
-        Bytes        = $bytes
-        LastModified = $lm
-        Error        = $err
-      }) | Out-Null
-    } catch { }
-  }
-
-  Export-Transfers -Rows $rows -OutCsv $OutCsv
-} else {
-  Write-Log "No se pudo detectar JobId; no generaré CSV por-archivo." 'WARN'
-}
-
-if ($GenerateRemoteInventory) {
-  $remoteCsv = [IO.Path]::ChangeExtension($OutCsv, '.remote.csv')
-  Export-RemoteInventory -DestUrl $destUrl -OutCsv $remoteCsv -AzCopyExe $az
-}
-
-Write-Log "Proceso finalizado."
-if ($LogDir)     { Write-Log "Logs nativos de AzCopy en: $LogDir" }
-if ($WrapperLog) { Write-Log "Wrapper log en: $WrapperLog" }
+Write-Log "Logs nativos de AzCopy -> $AzNative"
+Write-Log ("Logs wrapper -> {0}-{1}.txt (rotación por {2} MB)" -f $LogPrefix,$script:LogIndex,$MaxLogSizeMB)
