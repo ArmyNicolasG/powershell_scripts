@@ -41,6 +41,9 @@
 .PARAMETER MaxLogSizeMB
   Tamaño máximo por archivo de log rotativo (default 8 MB).
 
+.PARAMETER AzCopyPath
+  Ruta a azcopy.exe (si no, usa 'azcopy' del PATH).
+
 .EXAMPLE
   .\ps_UploadToFileShareFromCsv_vNext.ps1 `
     -SourceRoot "\\192.168.98.19\UnidadX\1CONTABILIDAD\ESTADOS FINANCIEROS" `
@@ -160,7 +163,7 @@ $destUrl = Build-DestUrl -StorageAccount $StorageAccount -ShareName $ShareName -
 
 # ---------- Comando AzCopy ----------
 $az = $AzCopyPath
-$args = @('copy', $src, $destUrl, '--recursive=true', "--overwrite=$Overwrite", '--output-type','json','--output-level','essential','--log-level','INFO')
+$args = @('copy', $src, $destUrl, '--recursive=true', "--overwrite=$Overwrite",'--output-level','essential','--log-level','INFO')
 
 if ($IncludePaths -and $IncludePaths.Count -gt 0) {
   $inc = ($IncludePaths -join ';')
