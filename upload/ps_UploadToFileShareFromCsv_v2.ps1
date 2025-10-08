@@ -43,6 +43,11 @@
 
 .PARAMETER AzCopyPath
   Ruta a azcopy.exe (si no, usa 'azcopy' del PATH).
+.PARAMETER NativeLogLevel
+  Nivel de logs nativos de AzCopy (ERROR por defecto) para evitar ruido. Valores comunes: ERROR, INFO, WARNING, PANIC.
+
+.PARAMETER ConsoleOutputLevel
+  Nivel de salida en consola (AzCopy): essential (default), quiet, info.
 
 .EXAMPLE
   .\ps_UploadToFileShareFromCsv_vNext.ps1 `
@@ -57,6 +62,9 @@
     -StorageAccount "miacct" -ShareName "backups" -DestSubPath "/2025" `
     -Sas "sv=..." -ServiceType Blob `
     -LogDir "D:\logs\migracion\backup-blob"
+    .PARAMETER GenerateStatusReports
+  Si se indica, genera failed.txt, skipped.txt, completed.txt y summary.txt en -LogDir.
+
 #>
 
 [CmdletBinding()]
@@ -73,7 +81,11 @@ param(
   [string]$AzCopyPath = 'azcopy',
   [switch]$PreservePermissions,
   [Parameter(Mandatory)][string]$LogDir,
-  [int]$MaxLogSizeMB = 8
+  [int]$MaxLogSizeMB = 8,
+
+  [switch]$GenerateStatusReports,
+  [ValidateSet('ERROR','INFO','WARNING','PANIC')][string]$NativeLogLevel = 'ERROR',
+  [ValidateSet('essential','quiet','info')][string]$ConsoleOutputLevel = 'essential'
 )
 
 # ---------- Helpers base ----------
@@ -90,70 +102,49 @@ function Add-LongPathPrefix {
   if ($SystemPath -like '\\*') { return "\\?\UNC\{0}" -f $SystemPath.TrimStart('\') }
   $SystemPath
 }
-function Ensure-Directory {
-  param([string]$Dir)
+function Ensure-Directory { param([string]$Dir)
   $lp = Add-LongPathPrefix (Convert-ToSystemPath $Dir)
   [void][System.IO.Directory]::CreateDirectory($lp)
 }
 
 # ---------- Logger rotativo (consola + archivo) ----------
+Ensure-Directory -Dir $LogDir
 $LogPrefix = Join-Path $LogDir 'upload-logs'
 $script:LogIndex = 1
 $script:LogPath  = "{0}-{1}.txt" -f $LogPrefix, $script:LogIndex
 $MaxBytes = [int64]$MaxLogSizeMB * 1MB
-Ensure-Directory -Dir $LogDir
 
-function Open-NewLog {
-  $script:LogIndex++
-  $script:LogPath = "{0}-{1}.txt" -f $LogPrefix, $script:LogIndex
-}
+function Open-NewLog { $script:LogIndex++; $script:LogPath = "{0}-{1}.txt" -f $LogPrefix, $script:LogIndex }
 function Write-Log {
   param([string]$Message,[string]$Level='INFO')
   $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
   $line = "[$ts][$Level] $Message"
-  # consola
   Write-Host $line
-  # archivo con rotación por tamaño y FileShare RW
-  $lp = Add-LongPathPrefix (Convert-ToSystemPath $script:LogPath)
-  [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
-  $max = 4
-  for($i=1;$i -le $max;$i++){
-    try {
-      if (Test-Path -LiteralPath $script:LogPath) {
-        $len = (Get-Item -LiteralPath $script:LogPath).Length
-        if ($len -ge $MaxBytes) { Open-NewLog }
-      }
-      $lp = Add-LongPathPrefix (Convert-ToSystemPath $script:LogPath)
-      $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
-      $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($true))
-      $sw.WriteLine($line); $sw.Dispose(); $fs.Dispose(); break
-    } catch {
-      if ($i -eq $max) { Write-Host "[$ts][WARN] No se pudo escribir log: $($_.Exception.Message)" }
-      else { Start-Sleep -Milliseconds (100 * $i * $i) }
+  try {
+    if (Test-Path -LiteralPath $script:LogPath) {
+      $len = (Get-Item -LiteralPath $script:LogPath).Length
+      if ($len -ge $MaxBytes) { Open-NewLog }
     }
-  }
+    $lp = Add-LongPathPrefix (Convert-ToSystemPath $script:LogPath)
+    $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($true))
+    $sw.WriteLine($line); $sw.Dispose(); $fs.Dispose()
+  } catch {}
 }
 
-# ---------- Construcción de URL destino manteniendo tu estilo ----------
+# ---------- Build Dest URL ----------
 function Build-DestUrl {
   param([string]$StorageAccount,[string]$ShareName,[string]$DestSubPath,[string]$Sas,[string]$ServiceType)
   $sub = $DestSubPath
   if ([string]::IsNullOrWhiteSpace($sub)) { $sub = "" }
   $sub = $sub -replace '\\','/'
   if ($sub -and -not $sub.StartsWith('/')) { $sub = '/' + $sub }
-  $sasT = $Sas.Trim()
-  if (-not $sasT.StartsWith('?')) { $sasT = '?' + $sasT }
-
-  if ($ServiceType -eq 'Blob') {
-    # El nombre "ShareName" se usa como contenedor
-    return "https://$StorageAccount.blob.core.windows.net/$ShareName$sub$sasT"
-  } else {
-    return "https://$StorageAccount.file.core.windows.net/$ShareName$sub$sasT"
-  }
+  $sasT = $Sas.Trim(); if (-not $sasT.StartsWith('?')) { $sasT = '?' + $sasT }
+  if ($ServiceType -eq 'Blob') { "https://$StorageAccount.blob.core.windows.net/$ShareName$sub$sasT" }
+  else                         { "https://$StorageAccount.file.core.windows.net/$ShareName$sub$sasT" }
 }
 
-# ---------- Preparación de entorno ----------
-Ensure-Directory -Dir $LogDir
+# preparación comando
 $AzNative = Join-Path $LogDir 'azcopy'
 Ensure-Directory -Dir $AzNative
 $env:AZCOPY_LOG_LOCATION = $AzNative
@@ -161,15 +152,15 @@ $env:AZCOPY_LOG_LOCATION = $AzNative
 $src = Convert-ToSystemPath $SourceRoot
 $destUrl = Build-DestUrl -StorageAccount $StorageAccount -ShareName $ShareName -DestSubPath $DestSubPath -Sas $Sas -ServiceType $ServiceType
 
-# ---------- Comando AzCopy ----------
 $az = $AzCopyPath
-$args = @('copy', $src, $destUrl, '--recursive=true', "--overwrite=$Overwrite",'--output-level','essential','--log-level','INFO')
+$args = @('copy', $src, $destUrl, '--recursive=true',
+          "--overwrite=$Overwrite",
+          '--output-level', $ConsoleOutputLevel,
+          '--log-level', $NativeLogLevel)
 
 if ($IncludePaths -and $IncludePaths.Count -gt 0) {
-  $inc = ($IncludePaths -join ';')
-  $args += @('--include-path', $inc)
+  $args += @('--include-path', ($IncludePaths -join ';'))
 }
-
 if ($ServiceType -eq 'FileShare' -and $PreservePermissions) {
   $args += @('--preserve-smb-permissions=true','--preserve-smb-info=true')
 }
@@ -177,62 +168,91 @@ if ($ServiceType -eq 'FileShare' -and $PreservePermissions) {
 Write-Log "Destino: $destUrl"
 Write-Log ("Ejecutando: {0} {1}" -f $az, ($args -join ' '))
 
-# ---------- Ejecución y captura ----------
+#  capturar salida 
+$jobStart = Get-Date
 $outLines = @()
 & $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object {
-  # Mostrar cada línea cruda también en log para auditoría
-  try { Write-Log $_ 'AZCOPY' } catch {}
+  Write-Log $_ 'AZCOPY'
 } | Out-Null
 
-if ($LASTEXITCODE -ne 0) {
-  Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN'
-}
+if ($LASTEXITCODE -ne 0) { Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN' }
 
-# ---------- Resumen legible (a partir del JSON de azcopy) ----------
-# Buscar el bloque "EndOfJob" / "CompleteJobOrdered" en la salida JSONL
+# resumen
 $summary = @{
-  JobID = $null; Status=$null; TotalTransfers=$null; TransfersCompleted=$null; TransfersFailed=$null; TransfersSkipped=$null;
-  BytesEnumerated=$null; BytesTransferred=$null; ElapsedSeconds=$null; FilesScanned=$null; FoldersScanned=$null
+  JobID=$null; Status=$null; TotalTransfers=$null; Completed=$null; Failed=$null; Skipped=$null;
+  BytesTransferred=$null; Elapsed=$null
+}
+foreach ($ln in $outLines) {
+  if ($ln -match 'Job\s+([0-9a-fA-F-]{8,})\s+has started') { $summary.JobID = $Matches[1] }
+  if ($ln -match '^Final Job Status:\s*(.+)$')             { $summary.Status = $Matches[1].Trim() }
+  if ($ln -match '^Total Number of Transfers:\s*(\d+)')    { $summary.TotalTransfers = [int]$Matches[1] }
+  if ($ln -match '^Number of File Transfers:\s*(\d+)')     { $summary.TotalTransfers = [int]$Matches[1] }
+  if ($ln -match '^Number of Transfers Completed:\s*(\d+)'){ $summary.Completed = [int]$Matches[1] }
+  if ($ln -match '^Number of Transfers Failed:\s*(\d+)')   { $summary.Failed = [int]$Matches[1] }
+  if ($ln -match '^Number of Transfers Skipped:\s*(\d+)')  { $summary.Skipped = [int]$Matches[1] }
+  if ($ln -match '^Total Bytes Transferred:\s*(\d+)')      { $summary.BytesTransferred = [int64]$Matches[1] }
+  if ($ln -match '^Elapsed Time:\s*(.+)$')                 { $summary.Elapsed = $Matches[1].Trim() }
 }
 
-foreach ($line in $outLines) {
-  try {
-    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-    $o = $line | ConvertFrom-Json -ErrorAction Stop
+Write-Log "===================== RESUMEN DE AZCOPY ====================="
+if ($summary.JobID)           { Write-Log ("JobID:               {0}" -f $summary.JobID) }
+if ($summary.Status)          { Write-Log ("Estado:              {0}" -f $summary.Status) }
+if ($summary.TotalTransfers)  { Write-Log ("Total transfers:     {0}" -f $summary.TotalTransfers) }
+if ($summary.Completed)       { Write-Log ("Completados:         {0}" -f $summary.Completed) }
+if ($summary.Failed -ne $null){ Write-Log ("Fallidos:            {0}" -f $summary.Failed) }
+if ($summary.Skipped -ne $null){Write-Log ("Saltados:            {0}" -f $summary.Skipped) }
+if ($summary.BytesTransferred){ Write-Log ("Bytes transferidos:  {0}" -f $summary.BytesTransferred) }
+if ($summary.Elapsed)         { Write-Log ("Duración:            {0}" -f $summary.Elapsed) }
+Write-Log "============================================================="
 
-    if ($null -ne $o.JobID) { $summary.JobID = $o.JobID }
-    if ($o.MessageType -eq 'EndOfJob' -or $o.MessageType -eq 'CompleteJobOrdered') {
-      $m = $o.MessageContent
-      if ($m) {
-        # AzCopy suele devolver propiedades con estos nombres (varían por versión)
-        $summary.Status              = $m.JobStatus            ?? $summary.Status
-        $summary.TotalTransfers      = $m.TotalTransfers       ?? $summary.TotalTransfers
-        $summary.TransfersCompleted  = $m.TransfersCompleted   ?? $summary.TransfersCompleted
-        $summary.TransfersFailed     = $m.TransfersFailed      ?? $summary.TransfersFailed
-        $summary.TransfersSkipped    = $m.TransfersSkipped     ?? $summary.TransfersSkipped
-        $summary.BytesEnumerated     = $m.TotalBytesEnumerated ?? $m.BytesEnumerated ?? $summary.BytesEnumerated
-        $summary.BytesTransferred    = $m.BytesOverWire        ?? $m.TotalBytesTransferred ?? $summary.BytesTransferred
-        $summary.ElapsedSeconds      = $m.ElapsedTimeInMs      ? [math]::Round($m.ElapsedTimeInMs/1000,2) : $summary.ElapsedSeconds
-        $summary.FilesScanned        = $m.FileTransfers        ?? $summary.FilesScanned
-        $summary.FoldersScanned      = $m.FolderPropertyTransfers ?? $summary.FoldersScanned
+# ---------- Reportes por estado (TXT) usando jobs show JSON (solo para procesar) ----------
+if ($GenerateStatusReports -and $summary.JobID) {
+  Write-Log "Generando reportes de estado (failed/skipped/completed) …"
+  $jobId = $summary.JobID
+  $json = & $az jobs show $jobId --with-status=All --output-type json 2>$null
+  $failed = New-Object System.Collections.Generic.List[object]
+  $skipped= New-Object System.Collections.Generic.List[object]
+  $done   = New-Object System.Collections.Generic.List[object]
+
+  foreach ($ln in $json) {
+    try {
+      if ([string]::IsNullOrWhiteSpace($ln)) { continue }
+      $o = $ln | ConvertFrom-Json -ErrorAction Stop
+      $path = $o.path ?? $o.Path ?? $o.Destination ?? $o.Source ?? $null
+      $status = $o.status ?? $o.Status ?? $o.TransferStatus ?? $null
+      $err = $o.errorMsg ?? $o.ErrorMsg ?? $o.Error ?? $null
+
+      switch ($status) {
+        'Success'      { $done.Add($path)    | Out-Null }
+        'Completed'    { $done.Add($path)    | Out-Null }
+        'Skipped'      { $skipped.Add($path) | Out-Null }
+        'Failed'       { $failed.Add(@("$path | $err")) | Out-Null }
       }
-    }
-  } catch { continue }
-}
+    } catch {}
+  }
 
-Write-Log "===================== RESUMEN DE AZCOPY =====================" 'INFO'
-if ($summary.JobID)              { Write-Log ("JobID:             {0}" -f $summary.JobID) }
-if ($summary.Status)             { Write-Log ("Estado:            {0}" -f $summary.Status) }
-if ($summary.TotalTransfers)     { Write-Log ("Total transfers:   {0}" -f $summary.TotalTransfers) }
-if ($summary.TransfersCompleted) { Write-Log ("Completados:       {0}" -f $summary.TransfersCompleted) }
-if ($summary.TransfersFailed)    { Write-Log ("Fallidos:          {0}" -f $summary.TransfersFailed) }
-if ($summary.TransfersSkipped)   { Write-Log ("Saltados:          {0}" -f $summary.TransfersSkipped) }
-if ($summary.FilesScanned)       { Write-Log ("Archivos tratados: {0}" -f $summary.FilesScanned) }
-if ($summary.FoldersScanned)     { Write-Log ("Carpetas tratadas: {0}" -f $summary.FoldersScanned) }
-if ($summary.BytesEnumerated)    { Write-Log ("Bytes enumerados:  {0}" -f $summary.BytesEnumerated) }
-if ($summary.BytesTransferred)   { Write-Log ("Bytes enviados:    {0}" -f $summary.BytesTransferred) }
-if ($summary.ElapsedSeconds)     { Write-Log ("Duración (s):      {0}" -f $summary.ElapsedSeconds) }
-Write-Log "==============================================================" 'INFO'
+  $failedPath  = Join-Path $LogDir 'failed.txt'
+  $skippedPath = Join-Path $LogDir 'skipped.txt'
+  $donePath    = Join-Path $LogDir 'completed.txt'
+  $sumPath     = Join-Path $LogDir 'summary.txt'
+
+  if ($failed.Count  -gt 0) { $failed  | Set-Content -LiteralPath $failedPath  -Encoding UTF8; Write-Log "failed.txt -> $failedPath" }
+  if ($skipped.Count -gt 0) { $skipped | Set-Content -LiteralPath $skippedPath -Encoding UTF8; Write-Log "skipped.txt -> $skippedPath" }
+  if ($done.Count    -gt 0) { $done    | Set-Content -LiteralPath $donePath    -Encoding UTF8; Write-Log "completed.txt -> $donePath" }
+
+  $summaryLines = @(
+    "JobID:               $($summary.JobID)",
+    "Estado:              $($summary.Status)",
+    "Total transfers:     $($summary.TotalTransfers)",
+    "Completados:         $($summary.Completed)",
+    "Fallidos:            $($summary.Failed)",
+    "Saltados:            $($summary.Skipped)",
+    "Bytes transferidos:  $($summary.BytesTransferred)",
+    "Duración:            $($summary.Elapsed)"
+  )
+  $summaryLines | Set-Content -LiteralPath $sumPath -Encoding UTF8
+  Write-Log "summary.txt -> $sumPath"
+}
 
 Write-Log "Logs nativos de AzCopy -> $AzNative"
 Write-Log ("Logs wrapper -> {0}-{1}.txt (rotación por {2} MB)" -f $LogPrefix,$script:LogIndex,$MaxLogSizeMB)
