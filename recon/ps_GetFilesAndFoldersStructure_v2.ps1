@@ -1,3 +1,27 @@
+<#
+.SYNOPSIS
+  Inventario con verificación de accesibilidad inmediata, salida unificada y saneo opcional de nombres.
+
+    - LogDir se crea con Directory.CreateDirectory (long-path).
+    - LOG y CSV se escriben con StreamWriter (Append) + FileShare.ReadWrite + reintentos (sin Export-Csv).
+    - Preflight de escritura en -LogDir (Test-CanWrite).
+    - Columnas: Type, Name, OlderName, NewName, Path, LastWriteTime, UserHasAccess, AccessStatus, AccessError.
+    - Saneo solo si el NOMBRE es inválido; OlderName/NewName se rellenan cuando hay renombre real.
+    - folder-info.txt con contadores y TotalBytes (si -ComputeRootSize).
+
+.PARAMETER Path              Raíz a inventariar (local o UNC).
+.PARAMETER LogDir            Carpeta local para outputs (CSV, LOG, TXT).
+.PARAMETER Depth             Profundidad máxima (−1 ilimitado; 0 solo raíz).
+.PARAMETER IncludeFiles      Incluir archivos (default).
+.PARAMETER IncludeFolders    Incluir carpetas (default).
+.PARAMETER SkipReparsePoints Saltar reparse points (default).
+.PARAMETER Utc               Emite fechas en UTC; si no, locales.
+.PARAMETER ComputeRootSize   Suma de bytes de todos los archivos bajo la raíz.
+.PARAMETER SanitizeNames     Sanea/renombra SOLO si el nombre es inválido.
+.PARAMETER MaxNameLength     Longitud máxima de NOMBRE (no ruta), por defecto 255.
+.PARAMETER ReplacementChar   Carácter de reemplazo para inválidos, por defecto "_".
+#>
+
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string]$Path,
@@ -107,7 +131,7 @@ function Get-EnumOptions {
   $o
 }
 
-# --- NUEVO: lectura real de archivo ---
+# --- lectura real de archivo ---
 function Test-FileReadable {
   param([Parameter(Mandatory)][string]$FilePathLP)
   try {
@@ -123,7 +147,7 @@ function Test-FileReadable {
   }
 }
 
-# --- NUEVO: comprobación robusta de listado de carpeta ---
+# --- comprobación robusta de listado de carpeta ---
 function Test-DirListImmediate {
   param([Parameter(Mandatory)][string]$DirPathLP)
 
@@ -213,7 +237,8 @@ function Try-RenameItem { param([string]$CurrentPath,[string]$NewName,[bool]$IsD
 }
 
 # ---------- CSV ----------
-$csvColumns = @('Type','Name','OlderName','NewName','Path','LastWriteTime','UserHasAccess','AccessStatus','AccessError')
+# Añadimos CreationTime y FileSize
+$csvColumns = @('Type','Name','OlderName','NewName','Path','LastWriteTime','CreationTime','FileSize','UserHasAccess','AccessStatus','AccessError')
 $batch = New-Object System.Collections.Generic.List[object]
 $BATCH_SIZE=1000
 Write-LinesWithRetry -Path $OutCsv -Lines @(($csvColumns -join ','))
@@ -280,14 +305,21 @@ while ($queue.Count -gt 0) {
     $di = Get-DirInfoSafe -AnySystemPath $dirLP
     $folderName = if ($di) { $di.Name } else { Get-BaseName -PathString $dirFriendly }
     $folderLwt  = if ($di) { $di.LastWriteTime } else { [System.IO.Directory]::GetLastWriteTime($dirLP) }
+    $folderCrt  = if ($di) { $di.CreationTime } else { [System.IO.Directory]::GetCreationTime($dirLP) }
 
     if ($SkipReparsePoints -and $isReparse) {
-      Add-Row @{ Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName; Path=$dirFriendly; LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc); UserHasAccess=$false; AccessStatus='SKIPPED_REPARSE'; AccessError=$null }
+      Add-Row @{ Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName; Path=$dirFriendly;
+                 LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc);
+                 CreationTime=(Format-DateUtcOpt $folderCrt -Utc:$Utc);
+                 FileSize=$null; UserHasAccess=$false; AccessStatus='SKIPPED_REPARSE'; AccessError=$null }
       $InaccessibleFolders++; continue
     }
 
     $check = Test-DirListImmediate -DirPathLP $dirLP
-    Add-Row @{ Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName; Path=$dirFriendly; LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc); UserHasAccess=$check.OK; AccessStatus=($check.OK ? 'OK' : 'DENIED'); AccessError=$check.Error }
+    Add-Row @{ Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName; Path=$dirFriendly;
+               LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc);
+               CreationTime=(Format-DateUtcOpt $folderCrt -Utc:$Utc);
+               FileSize=$null; UserHasAccess=$check.OK; AccessStatus=($check.OK ? 'OK' : 'DENIED'); AccessError=$check.Error }
     if ($check.OK) { $AccessibleFolders++ } else { $InaccessibleFolders++; Write-Log "DENIED: $dirFriendly - $($check.Error)" 'WARN'; continue }
   }
 
@@ -306,7 +338,9 @@ while ($queue.Count -gt 0) {
         if ($IncludeFiles) {
           $TotalFiles++
           $name  = Get-BaseName -PathString $entryFriendly
-          Add-Row @{ Type='File'; Name=$name; OlderName=$null; NewName=$name; Path=$entryFriendly; LastWriteTime=$null; UserHasAccess=$false; AccessStatus='ATTR_DENIED'; AccessError=$attr.Error }
+          Add-Row @{ Type='File'; Name=$name; OlderName=$null; NewName=$name; Path=$entryFriendly;
+                     LastWriteTime=$null; CreationTime=$null; FileSize=$null;
+                     UserHasAccess=$false; AccessStatus='ATTR_DENIED'; AccessError=$attr.Error }
           $InaccessibleFiles++; Write-Log "ATTR_DENIED: $entryFriendly - $($attr.Error)" 'WARN'
         }
         continue
@@ -320,6 +354,7 @@ while ($queue.Count -gt 0) {
           $cd = Get-DirInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
           $childName = if ($cd) { $cd.Name } else { Get-BaseName -PathString $entryFriendly }
           $childLwt  = if ($cd) { $cd.LastWriteTime } else { [System.IO.Directory]::GetLastWriteTime((Add-LongPathPrefix $entrySys)) }
+          $childCrt  = if ($cd) { $cd.CreationTime } else { [System.IO.Directory]::GetCreationTime((Add-LongPathPrefix $entrySys)) }
 
           if ($SanitizeNames -and $cd -and (Test-NameInvalid -Name $cd.Name -MaxLen $MaxNameLength)) {
             $RenamedOrInvalidFolders++
@@ -333,6 +368,7 @@ while ($queue.Count -gt 0) {
                 $cd = Get-DirInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
                 $childName = if ($cd) { $cd.Name } else { $childName }
                 $childLwt  = if ($cd) { $cd.LastWriteTime } else { $childLwt }
+                $childCrt  = if ($cd) { $cd.CreationTime } else { $childCrt }
               } else {
                 Write-Log "RENAME_FAILED carpeta '$($cd.Name)' (prop.: '$unique'): $($ren.Error)" 'WARN'
               }
@@ -340,7 +376,10 @@ while ($queue.Count -gt 0) {
           }
 
           if ($SkipReparsePoints -and $isReparseChild) {
-            Add-Row @{ Type='Folder'; Name=$childName; OlderName=$null; NewName=$childName; Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $childLwt -Utc:$Utc); UserHasAccess=$false; AccessStatus='SKIPPED_REPARSE'; AccessError=$null }
+            Add-Row @{ Type='Folder'; Name=$childName; OlderName=$null; NewName=$childName; Path=$entryFriendly;
+                       LastWriteTime=(Format-DateUtcOpt $childLwt -Utc:$Utc);
+                       CreationTime=(Format-DateUtcOpt $childCrt -Utc:$Utc);
+                       FileSize=$null; UserHasAccess=$false; AccessStatus='SKIPPED_REPARSE'; AccessError=$null }
             $TotalFolders++; $InaccessibleFolders++; continue
           }
         }
@@ -351,6 +390,8 @@ while ($queue.Count -gt 0) {
           $fi = Get-FileInfoSafe -AnySystemPath (Add-LongPathPrefix $entrySys)
           $fileName = if ($fi) { $fi.Name } else { Get-BaseName -PathString $entryFriendly }
           $fileLwt  = if ($fi) { $fi.LastWriteTime } else { [System.IO.File]::GetLastWriteTime((Add-LongPathPrefix $entrySys)) }
+          $fileCrt  = if ($fi) { $fi.CreationTime } else { [System.IO.File]::GetCreationTime((Add-LongPathPrefix $entrySys)) }
+          $fileLen  = if ($fi) { [nullable[int64]]$fi.Length } else { $null }
           $olderName=$null; $newerName=$fileName; $wasInvalid=$false
 
           if ($fi -and $SanitizeNames -and (Test-NameInvalid -Name $fi.Name -MaxLen $MaxNameLength)) {
@@ -363,32 +404,40 @@ while ($queue.Count -gt 0) {
                 Write-Log "Renombrado archivo: '$($fi.Name)' -> '$unique' en '$($fi.DirectoryName)'"
                 $olderName=$fi.Name; $entryFriendly=$ren.NewPath
                 $fi = Get-FileInfoSafe -AnySystemPath (Add-LongPathPrefix (Convert-ToSystemPath $entryFriendly))
-                $fileName = if ($fi) { $fi.Name } else { $fileName }
-                $newerName = $fileName
-                $fileLwt = if ($fi) { $fi.LastWriteTime } else { $fileLwt }
+                if ($fi) {
+                  $fileName = $fi.Name
+                  $newerName = $fi.Name
+                  $fileLwt = $fi.LastWriteTime
+                  $fileCrt = $fi.CreationTime
+                  $fileLen = [nullable[int64]]$fi.Length
+                }
               } else {
                 Write-Log "RENAME_FAILED archivo '$($fi.Name)' (prop.: '$unique'): $($ren.Error)" 'WARN'
               }
             }
           }
 
-          if ($fi -and $ComputeRootSize) { $TotalBytes += [int64]$fi.Length }
+          if ($fi -and $ComputeRootSize -and $fileLen.HasValue) { $TotalBytes += [int64]$fileLen.Value }
 
           # DECISIÓN DE ACCESO REAL
           $probe = Test-FileReadable -FilePathLP (Add-LongPathPrefix $entrySys)
           if ($probe.OK) {
             $AccessibleFiles++
             Add-Row @{
-              Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName;
-              Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
+              Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName; Path=$entryFriendly;
+              LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
+              CreationTime=(Format-DateUtcOpt $fileCrt -Utc:$Utc);
+              FileSize=$fileLen;
               UserHasAccess=$true; AccessStatus='OK'; AccessError=$null
             }
             if ($wasInvalid) { $RenamedOrInvalidFiles++ }
           } else {
             $InaccessibleFiles++
             Add-Row @{
-              Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName;
-              Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
+              Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName; Path=$entryFriendly;
+              LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
+              CreationTime=(Format-DateUtcOpt $fileCrt -Utc:$Utc);
+              FileSize=$fileLen;  # si pudimos leer FileInfo, reporta tamaño; si no, queda vacío
               UserHasAccess=$false; AccessStatus='READ_DENIED'; AccessError=$probe.Error
             }
             Write-Log "READ_DENIED: $entryFriendly - $($probe.Error)" 'WARN'
@@ -401,7 +450,11 @@ while ($queue.Count -gt 0) {
       $di = Get-DirInfoSafe -AnySystemPath $dirLP
       $folderName = if ($di) { $di.Name } else { Get-BaseName -PathString $dirFriendly }
       $folderLwt  = if ($di) { $di.LastWriteTime } else { [System.IO.Directory]::GetLastWriteTime($dirLP) }
-      Add-Row @{ Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName; Path=$dirFriendly; LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc); UserHasAccess=$false; AccessStatus='ENUMERATION_ERROR'; AccessError=$_.Exception.Message }
+      $folderCrt  = if ($di) { $di.CreationTime } else { [System.IO.Directory]::GetCreationTime($dirLP) }
+      Add-Row @{ Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName; Path=$dirFriendly;
+                 LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc);
+                 CreationTime=(Format-DateUtcOpt $folderCrt -Utc:$Utc);
+                 FileSize=$null; UserHasAccess=$false; AccessStatus='ENUMERATION_ERROR'; AccessError=$_.Exception.Message }
       $InaccessibleFolders++; Write-Log "ENUMERATION_ERROR: $dirFriendly - $($_.Exception.Message)" 'WARN'
     }
   }
