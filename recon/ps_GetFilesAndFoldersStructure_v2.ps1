@@ -1,28 +1,3 @@
-<#
-.SYNOPSIS
-  Inventario con verificación de accesibilidad inmediata, salida unificada y saneo opcional de nombres.
-
-  v2.6.7 (server-safe IO):
-    - LogDir se crea con Directory.CreateDirectory (long-path).
-    - LOG y CSV se escriben con StreamWriter (Append) + FileShare.ReadWrite + reintentos (sin Export-Csv).
-    - Preflight de escritura en -LogDir (Test-CanWrite).
-    - Columnas: Type, Name, OlderName, NewName, Path, LastWriteTime, UserHasAccess, AccessStatus, AccessError.
-    - Saneo solo si el NOMBRE es inválido; OlderName/NewName se rellenan cuando hay renombre real.
-    - folder-info.txt con contadores y TotalBytes (si -ComputeRootSize).
-
-.PARAMETER Path              Raíz a inventariar (local o UNC).
-.PARAMETER LogDir            Carpeta local para outputs (CSV, LOG, TXT).
-.PARAMETER Depth             Profundidad máxima (−1 ilimitado; 0 solo raíz).
-.PARAMETER IncludeFiles      Incluir archivos (default).
-.PARAMETER IncludeFolders    Incluir carpetas (default).
-.PARAMETER SkipReparsePoints Saltar reparse points (default).
-.PARAMETER Utc               Emite fechas en UTC; si no, locales.
-.PARAMETER ComputeRootSize   Suma de bytes de todos los archivos bajo la raíz.
-.PARAMETER SanitizeNames     Sanea/renombra SOLO si el nombre es inválido.
-.PARAMETER MaxNameLength     Longitud máxima de NOMBRE (no ruta), por defecto 255.
-.PARAMETER ReplacementChar   Carácter de reemplazo para inválidos, por defecto "_".
-#>
-
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string]$Path,
@@ -80,7 +55,6 @@ $OutCsv  = Join-Path $LogDir 'inventory.csv'
 $LogPath = Join-Path $LogDir 'inventory.log'
 $InfoTxt = Join-Path $LogDir 'folder-info.txt'
 
-# - No borramos el .log (evita "access denied" si EDR/AV lo engancha)
 Remove-Item -LiteralPath $OutCsv -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $InfoTxt -ErrorAction SilentlyContinue
 
@@ -132,10 +106,62 @@ function Get-EnumOptions {
   $o.AttributesToSkip = [System.IO.FileAttributes]::Offline -bor [System.IO.FileAttributes]::Temporary -bor [System.IO.FileAttributes]::Device
   $o
 }
-function Test-DirReadable { param([string]$DirPathForDotNet)
-  try { $e=[System.IO.Directory]::EnumerateFileSystemEntries($DirPathForDotNet,'*',(Get-EnumOptions)); $it=$e.GetEnumerator(); $null=$it.MoveNext(); $it.Dispose(); @{OK=$true;Error=$null} }
-  catch { @{OK=$false;Error=$_.Exception.Message} }
+
+# --- NUEVO: lectura real de archivo ---
+function Test-FileReadable {
+  param([Parameter(Mandatory)][string]$FilePathLP)
+  try {
+    $fs = [System.IO.File]::Open($FilePathLP,
+                                 [System.IO.FileMode]::Open,
+                                 [System.IO.FileAccess]::Read,
+                                 [System.IO.FileShare]::ReadWrite)
+    $null = $fs.CanRead
+    $fs.Dispose()
+    return @{ OK = $true; Error = $null }
+  } catch {
+    return @{ OK = $false; Error = $_.Exception.Message }
+  }
 }
+
+# --- NUEVO: comprobación robusta de listado de carpeta ---
+function Test-DirListImmediate {
+  param([Parameter(Mandatory)][string]$DirPathLP)
+
+  $tryOnce = {
+    try {
+      $enum = [System.IO.Directory]::EnumerateFileSystemEntries($args[0], '*', (Get-EnumOptions))
+      $it = $enum.GetEnumerator()
+      $null = $it.MoveNext()
+      $it.Dispose()
+      return @{ OK = $true; Error = $null }
+    } catch {
+      return @{ OK = $false; Error = $_.Exception.Message }
+    }
+  }
+
+  $r = & $tryOnce $DirPathLP
+  if ($r.OK) { return $r }
+
+  Start-Sleep -Milliseconds 80
+  $r2 = & $tryOnce $DirPathLP
+  if ($r2.OK) { return $r2 }
+
+  try {
+    $filesEnum = [System.IO.Directory]::EnumerateFiles($DirPathLP, '*', (Get-EnumOptions))
+    $fIt = $filesEnum.GetEnumerator()
+    $fOk = $fIt.MoveNext(); $fIt.Dispose()
+  } catch { $fOk = $false }
+
+  try {
+    $dirsEnum = [System.IO.Directory]::EnumerateDirectories($DirPathLP, '*', (Get-EnumOptions))
+    $dIt = $dirsEnum.GetEnumerator()
+    $dOk = $dIt.MoveNext(); $dIt.Dispose()
+  } catch { $dOk = $false }
+
+  if ($fOk -or $dOk) { return @{ OK = $true; Error = $r2.Error } }
+  else { return $r2 }
+}
+
 function Get-AttrSafe { param([string]$AnySystemPath)
   try { @{OK=$true;Attr=[System.IO.File]::GetAttributes($AnySystemPath);Error=$null} } catch { @{OK=$false;Attr=$null;Error=$_.Exception.Message} }
 }
@@ -153,7 +179,7 @@ function Get-BaseName { param([Parameter(Mandatory)][string]$PathString)
 }
 
 # ---------- Validación de nombres ----------
-$InvalidSet = @('<','>',':','"','/','\','|','?','*')
+$InvalidSet = @('<','>',':','"','/','\','|','*','?')
 $ReservedNames = @('CON','PRN','AUX','NUL','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9')
 function Test-NameInvalid { param([string]$Name,[int]$MaxLen)
   if ([string]::IsNullOrEmpty($Name)) { return $true }
@@ -190,14 +216,12 @@ function Try-RenameItem { param([string]$CurrentPath,[string]$NewName,[bool]$IsD
 $csvColumns = @('Type','Name','OlderName','NewName','Path','LastWriteTime','UserHasAccess','AccessStatus','AccessError')
 $batch = New-Object System.Collections.Generic.List[object]
 $BATCH_SIZE=1000
-
-# Inicializa el CSV con cabecera
 Write-LinesWithRetry -Path $OutCsv -Lines @(($csvColumns -join ','))
 
 function Flush-Batch {
   if ($batch.Count -eq 0) { return }
   $lines = $batch | Select-Object -Property $csvColumns | ConvertTo-Csv -NoTypeInformation
-  if ($lines.Count -gt 0) { $lines = $lines[1..($lines.Count-1)] } # descarta la cabecera que añade ConvertTo-Csv
+  if ($lines.Count -gt 0) { $lines = $lines[1..($lines.Count-1)] }
   Write-LinesWithRetry -Path $OutCsv -Lines $lines
   $batch.Clear()
 }
@@ -262,7 +286,7 @@ while ($queue.Count -gt 0) {
       $InaccessibleFolders++; continue
     }
 
-    $check = Test-DirReadable -DirPathForDotNet $dirLP
+    $check = Test-DirListImmediate -DirPathLP $dirLP
     Add-Row @{ Type='Folder'; Name=$folderName; OlderName=$null; NewName=$folderName; Path=$dirFriendly; LastWriteTime=(Format-DateUtcOpt $folderLwt -Utc:$Utc); UserHasAccess=$check.OK; AccessStatus=($check.OK ? 'OK' : 'DENIED'); AccessError=$check.Error }
     if ($check.OK) { $AccessibleFolders++ } else { $InaccessibleFolders++; Write-Log "DENIED: $dirFriendly - $($check.Error)" 'WARN'; continue }
   }
@@ -349,8 +373,26 @@ while ($queue.Count -gt 0) {
           }
 
           if ($fi -and $ComputeRootSize) { $TotalBytes += [int64]$fi.Length }
-          $AccessibleFiles++; if ($wasInvalid) { $RenamedOrInvalidFiles++ }
-          Add-Row @{ Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName; Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc); UserHasAccess=$true; AccessStatus='OK'; AccessError=$null }
+
+          # DECISIÓN DE ACCESO REAL
+          $probe = Test-FileReadable -FilePathLP (Add-LongPathPrefix $entrySys)
+          if ($probe.OK) {
+            $AccessibleFiles++
+            Add-Row @{
+              Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName;
+              Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
+              UserHasAccess=$true; AccessStatus='OK'; AccessError=$null
+            }
+            if ($wasInvalid) { $RenamedOrInvalidFiles++ }
+          } else {
+            $InaccessibleFiles++
+            Add-Row @{
+              Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName;
+              Path=$entryFriendly; LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
+              UserHasAccess=$false; AccessStatus='READ_DENIED'; AccessError=$probe.Error
+            }
+            Write-Log "READ_DENIED: $entryFriendly - $($probe.Error)" 'WARN'
+          }
         }
       }
     }
