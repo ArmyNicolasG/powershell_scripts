@@ -236,8 +236,32 @@ function Try-RenameItem { param([string]$CurrentPath,[string]$NewName,[bool]$IsD
   catch{ @{OK=$false;NewPath=$CurrentPath;Error=$_.Exception.Message} }
 }
 
+# --- NUEVO: cálculo recursivo único del tamaño del árbol raíz ---
+function Compute-RootBytes {
+  param([Parameter(Mandatory)][string]$RootPath)
+  $lpRoot = Add-LongPathPrefix (Convert-ToSystemPath $RootPath)
+  $opts = [System.IO.EnumerationOptions]::new()
+  $opts.RecurseSubdirectories   = $true
+  $opts.ReturnSpecialDirectories= $false
+  $opts.IgnoreInaccessible      = $true
+  $opts.AttributesToSkip        = [System.IO.FileAttributes]::Offline -bor `
+                                  [System.IO.FileAttributes]::Temporary -bor `
+                                  [System.IO.FileAttributes]::Device
+
+  [long]$sum = 0
+  try {
+    $files = [System.IO.Directory]::EnumerateFiles($lpRoot, '*', $opts)
+    foreach ($f in $files) {
+      try {
+        $fi = [System.IO.FileInfo]::new($f)
+        $sum += [int64]$fi.Length
+      } catch { }
+    }
+  } catch { }
+  return $sum
+}
+
 # ---------- CSV ----------
-# Añadimos CreationTime y FileSize
 $csvColumns = @('Type','Name','OlderName','NewName','Path','LastWriteTime','CreationTime','FileSize','UserHasAccess','AccessStatus','AccessError')
 $batch = New-Object System.Collections.Generic.List[object]
 $BATCH_SIZE=1000
@@ -417,8 +441,6 @@ while ($queue.Count -gt 0) {
             }
           }
 
-          if ($fi -and $ComputeRootSize -and $fileLen.HasValue) { $TotalBytes += [int64]$fileLen.Value }
-
           # DECISIÓN DE ACCESO REAL
           $probe = Test-FileReadable -FilePathLP (Add-LongPathPrefix $entrySys)
           if ($probe.OK) {
@@ -437,7 +459,7 @@ while ($queue.Count -gt 0) {
               Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName; Path=$entryFriendly;
               LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
               CreationTime=(Format-DateUtcOpt $fileCrt -Utc:$Utc);
-              FileSize=$fileLen;  # si pudimos leer FileInfo, reporta tamaño; si no, queda vacío
+              FileSize=$fileLen;  # si se pudo leer FileInfo; si no, queda vacío
               UserHasAccess=$false; AccessStatus='READ_DENIED'; AccessError=$probe.Error
             }
             Write-Log "READ_DENIED: $entryFriendly - $($probe.Error)" 'WARN'
@@ -463,6 +485,11 @@ while ($queue.Count -gt 0) {
 Flush-Batch
 
 # ---------- Folder info ----------
+if ($ComputeRootSize) {
+  # cálculo único y recursivo del tamaño del árbol raíz
+  $TotalBytes = Compute-RootBytes -RootPath $friendlyRoot
+}
+
 $report = New-Object System.Collections.Generic.List[string]
 $report.Add(("RootPath: {0}" -f $friendlyRoot)) | Out-Null
 $report.Add(("TotalFolders: {0}" -f $TotalFolders)) | Out-Null
