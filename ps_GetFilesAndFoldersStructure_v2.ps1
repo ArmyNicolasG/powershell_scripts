@@ -5,9 +5,10 @@
     - LogDir se crea con Directory.CreateDirectory (long-path).
     - LOG y CSV se escriben con StreamWriter (Append) + FileShare.ReadWrite + reintentos (sin Export-Csv).
     - Preflight de escritura en -LogDir (Test-CanWrite).
-    - Columnas: Type, Name, OlderName, NewName, Path, LastWriteTime, UserHasAccess, AccessStatus, AccessError.
+    - Columnas: Type, Name, OlderName, NewName, Path, LastWriteTime, CreationTime, FileSize, UserHasAccess, AccessStatus, AccessError.
     - Saneo solo si el NOMBRE es inválido; OlderName/NewName se rellenan cuando hay renombre real.
     - folder-info.txt con contadores y TotalBytes (si -ComputeRootSize).
+    - NUEVO: inventory-failed-or-denied.csv con la misma estructura pero solo filas sin acceso.
 
 .PARAMETER Path              Raíz a inventariar (local o UNC).
 .PARAMETER LogDir            Carpeta local para outputs (CSV, LOG, TXT).
@@ -75,11 +76,13 @@ function Test-CanWrite {
 
 # ---------- Rutas de salida ----------
 if (-not (Ensure-Directory -Dir $LogDir)) { throw "No se pudo preparar LogDir '$LogDir'." }
-$OutCsv  = Join-Path $LogDir 'inventory.csv'
-$LogPath = Join-Path $LogDir 'inventory.log'
-$InfoTxt = Join-Path $LogDir 'folder-info.txt'
+$OutCsv        = Join-Path $LogDir 'inventory.csv'
+$OutCsvDenied  = Join-Path $LogDir 'inventory-failed-or-denied.csv'   
+$LogPath       = Join-Path $LogDir 'inventory.log'
+$InfoTxt       = Join-Path $LogDir 'folder-info.txt'
 
 Remove-Item -LiteralPath $OutCsv -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $OutCsvDenied -ErrorAction SilentlyContinue  
 Remove-Item -LiteralPath $InfoTxt -ErrorAction SilentlyContinue
 
 # ---------- Logging robusto ----------
@@ -236,7 +239,7 @@ function Try-RenameItem { param([string]$CurrentPath,[string]$NewName,[bool]$IsD
   catch{ @{OK=$false;NewPath=$CurrentPath;Error=$_.Exception.Message} }
 }
 
-# --- NUEVO: cálculo recursivo único del tamaño del árbol raíz ---
+# --- Cálculo recursivo único del tamaño del árbol raíz ---
 function Compute-RootBytes {
   param([Parameter(Mandatory)][string]$RootPath)
   $lpRoot = Add-LongPathPrefix (Convert-ToSystemPath $RootPath)
@@ -247,15 +250,11 @@ function Compute-RootBytes {
   $opts.AttributesToSkip        = [System.IO.FileAttributes]::Offline -bor `
                                   [System.IO.FileAttributes]::Temporary -bor `
                                   [System.IO.FileAttributes]::Device
-
   [long]$sum = 0
   try {
     $files = [System.IO.Directory]::EnumerateFiles($lpRoot, '*', $opts)
     foreach ($f in $files) {
-      try {
-        $fi = [System.IO.FileInfo]::new($f)
-        $sum += [int64]$fi.Length
-      } catch { }
+      try { $fi = [System.IO.FileInfo]::new($f); $sum += [int64]$fi.Length } catch { }
     }
   } catch { }
   return $sum
@@ -263,9 +262,13 @@ function Compute-RootBytes {
 
 # ---------- CSV ----------
 $csvColumns = @('Type','Name','OlderName','NewName','Path','LastWriteTime','CreationTime','FileSize','UserHasAccess','AccessStatus','AccessError')
-$batch = New-Object System.Collections.Generic.List[object]
+$batch        = New-Object System.Collections.Generic.List[object]
+$batchDenied  = New-Object System.Collections.Generic.List[object]   # NUEVO
 $BATCH_SIZE=1000
-Write-LinesWithRetry -Path $OutCsv -Lines @(($csvColumns -join ','))
+
+# cabeceras
+Write-LinesWithRetry -Path $OutCsv       -Lines @(($csvColumns -join ','))
+Write-LinesWithRetry -Path $OutCsvDenied -Lines @(($csvColumns -join ','))  # NUEVO
 
 function Flush-Batch {
   if ($batch.Count -eq 0) { return }
@@ -274,12 +277,27 @@ function Flush-Batch {
   Write-LinesWithRetry -Path $OutCsv -Lines $lines
   $batch.Clear()
 }
+function Flush-BatchDenied {                                            # NUEVO
+  if ($batchDenied.Count -eq 0) { return }
+  $lines = $batchDenied | Select-Object -Property $csvColumns | ConvertTo-Csv -NoTypeInformation
+  if ($lines.Count -gt 0) { $lines = $lines[1..($lines.Count-1)] }
+  Write-LinesWithRetry -Path $OutCsvDenied -Lines $lines
+  $batchDenied.Clear()
+}
+
 function Add-Row {
   param([hashtable]$Row)
-  $o=[ordered]@{}
-  foreach($c in $csvColumns){ $o[$c] = $(if($Row.ContainsKey($c)){$Row[$c]}else{$null}) }
-  $batch.Add([pscustomobject]$o)|Out-Null
+  # principal
+  $o=[ordered]@{}; foreach($c in $csvColumns){ $o[$c] = $(if($Row.ContainsKey($c)){$Row[$c]}else{$null}) }
+  $obj = [pscustomobject]$o
+  $batch.Add($obj) | Out-Null
   if($batch.Count -ge $BATCH_SIZE){ Flush-Batch }
+
+  # duplicado a "denied" si aplica
+  if ($Row.ContainsKey('UserHasAccess') -and -not [bool]$Row['UserHasAccess']) {
+    $batchDenied.Add([pscustomobject]$o) | Out-Null
+    if ($batchDenied.Count -ge $BATCH_SIZE) { Flush-BatchDenied }
+  }
 }
 
 # ---------- Contadores ----------
@@ -441,7 +459,6 @@ while ($queue.Count -gt 0) {
             }
           }
 
-          # DECISIÓN DE ACCESO REAL
           $probe = Test-FileReadable -FilePathLP (Add-LongPathPrefix $entrySys)
           if ($probe.OK) {
             $AccessibleFiles++
@@ -459,7 +476,7 @@ while ($queue.Count -gt 0) {
               Type='File'; Name=$fileName; OlderName=$olderName; NewName=$newerName; Path=$entryFriendly;
               LastWriteTime=(Format-DateUtcOpt $fileLwt -Utc:$Utc);
               CreationTime=(Format-DateUtcOpt $fileCrt -Utc:$Utc);
-              FileSize=$fileLen;  # si se pudo leer FileInfo; si no, queda vacío
+              FileSize=$fileLen;
               UserHasAccess=$false; AccessStatus='READ_DENIED'; AccessError=$probe.Error
             }
             Write-Log "READ_DENIED: $entryFriendly - $($probe.Error)" 'WARN'
@@ -483,12 +500,10 @@ while ($queue.Count -gt 0) {
 }
 
 Flush-Batch
+Flush-BatchDenied   # NUEVO
 
 # ---------- Folder info ----------
-if ($ComputeRootSize) {
-  # cálculo único y recursivo del tamaño del árbol raíz
-  $TotalBytes = Compute-RootBytes -RootPath $friendlyRoot
-}
+if ($ComputeRootSize) { $TotalBytes = Compute-RootBytes -RootPath $friendlyRoot }
 
 $report = New-Object System.Collections.Generic.List[string]
 $report.Add(("RootPath: {0}" -f $friendlyRoot)) | Out-Null
@@ -513,6 +528,7 @@ try {
 
 Write-Log "Inventario completado."
 Write-Log "CSV  -> $OutCsv"
+Write-Log "CSV  -> $OutCsvDenied (solo denegados)"   # NUEVO
 Write-Log "LOG  -> $LogPath"
 Write-Log "INFO -> $InfoTxt"
 if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
