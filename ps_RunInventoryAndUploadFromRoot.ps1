@@ -137,55 +137,112 @@ Info "Procesando en paralelo con Throttle=$throttle (inventario y subida en para
 
 $jobPerFolder = [System.Collections.Concurrent.ConcurrentDictionary[string,object]]::new()
 
-$folders | ForEach-Object -Parallel {
-  param($dir,$InventoryScript,$UploadScript,$InventoryLogRoot,$UploadLogRoot,$StorageAccount,$ShareName,$DestBaseSubPath,$Sas,$ServiceType,$Overwrite,$PreservePermissions,$AzCopyPath,$MaxLogSizeMB,$ComputeRootSize,$jobPerFolder)
+function Invoke-FolderWork {
+  param(
+    [string]$Folder,
+    [string]$InventoryScript, [string]$InventoryLogRoot, [switch]$ComputeRootSize,
+    [string]$UploadScript,    [string]$UploadLogRoot,
+    [string]$StorageAccount,  [string]$ShareName, [string]$DestBaseSubPath, [string]$Sas,
+    [ValidateSet('FileShare','Blob')]$ServiceType = 'FileShare',
+    [string]$AzCopyPath = 'azcopy',
+    [ValidateSet('ifSourceNewer','true','false','prompt')]$Overwrite = 'ifSourceNewer',
+    [switch]$PreservePermissions
+  )
 
-  function Ens([string]$p){ if(-not (Test-Path -LiteralPath $p)){ New-Item -ItemType Directory -Path $p -Force | Out-Null } }
-  function JoinUrl([string]$a,[string]$b){ $a=$a -replace '\\','/'; if($a -and -not $a.StartsWith('/')){$a='/'+$a}; $b=$b -replace '\\','/'; if($a.EndsWith('/')){$a+$b}else{$a+'/'+$b} }
-  function TNow(){ (Get-Date).ToString('HH:mm:ss.fff') }
+  $folderName = Split-Path $Folder -Leaf
+  $invLogDir  = Join-Path $InventoryLogRoot $folderName
+  $uplLogDir  = Join-Path $UploadLogRoot    $folderName
+  New-Item -ItemType Directory -Force -Path $invLogDir,$uplLogDir | Out-Null
 
-  $name = $dir.Name
-  $invLog = Join-Path $InventoryLogRoot $name; Ens $invLog
-  $upLog  = Join-Path $UploadLogRoot $name;   Ens $upLog
-  $destSub = JoinUrl $DestBaseSubPath $name
+  Write-Host "[INFO] [$folderName] Inventario -> $invLogDir"
+  $invArgs = @(
+    '-Path', $Folder,
+    '-LogDir', $invLogDir
+  )
+  if ($ComputeRootSize) { $invArgs += '-ComputeRootSize' }
 
-  Write-Host "[$(TNow)][INFO] ($name) lanzando INVENTARIO y SUBIDA en paralelo…"
+  # Lanza INVENTARIO
+  & $InventoryScript @invArgs 2>&1 | ForEach-Object { Write-Host $_ }
 
-  $invJob = Start-Job -ScriptBlock {
-    param($InventoryScript,$Path,$LogDir,$ComputeRootSize)
-    & $InventoryScript -Path $Path -LogDir $LogDir @(@{ComputeRootSize=$true}[$ComputeRootSize]).Keys
-  } -ArgumentList @($InventoryScript,$dir.FullName,$invLog,$ComputeRootSize)
+  Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
+  $uplArgs = @(
+    '-SourceRoot', $Folder,
+    '-StorageAccount', $StorageAccount,
+    '-ShareName', $ShareName,
+    '-DestSubPath', (Join-Path $DestBaseSubPath $folderName -Resolve:$false) -replace '\\','/',
+    '-Sas', $Sas,
+    '-ServiceType', $ServiceType,
+    '-LogDir', $uplLogDir,
+    '-AzCopyPath', $AzCopyPath,
+    '-Overwrite', $Overwrite
+  )
+  if ($PreservePermissions) { $uplArgs += '-PreservePermissions' }
 
-  $uplJob = Start-Job -ScriptBlock {
-    param($UploadScript,$Path,$StorageAccount,$ShareName,$DestSubPath,$Sas,$ServiceType,$Overwrite,$PreservePermissions,$AzCopyPath,$LogDir,$MaxLogSizeMB)
-    $h=@{
-      SourceRoot     = $Path
-      StorageAccount = $StorageAccount
-      ShareName      = $ShareName
-      DestSubPath    = $DestSubPath
-      Sas            = $Sas
-      ServiceType    = $ServiceType
-      Overwrite      = $Overwrite
-      AzCopyPath     = $AzCopyPath
-      LogDir         = $LogDir
-      MaxLogSizeMB   = $MaxLogSizeMB
+  # Lanza SUBIDA
+  & $UploadScript @uplArgs 2>&1 | ForEach-Object { Write-Host $_ }
+
+  # Al terminar, devuelve un pequeño resumen por carpeta (el que ya construyes después puede reunirse de estos)
+  [pscustomobject]@{ Folder = $Folder; Status = 'Done' }
+}
+
+# --- Ejecución paralela portable ---
+function Run-InParallelPortable {
+  param(
+    [string[]]$Folders,
+    [int]$Throttle = 2,
+    [Parameter(Mandatory)]$CommonParams  # hashtable con todos los params requeridos por Invoke-FolderWork
+  )
+
+  $isPS7 = $PSVersionTable.PSVersion.Major -ge 7
+
+  if ($isPS7) {
+    Write-Host "[INFO] Procesando en paralelo con PS7 (-Parallel), Throttle=$Throttle"
+    $Folders | ForEach-Object -Parallel {
+      Invoke-FolderWork @using:CommonParams -Folder $_
+    } -ThrottleLimit $Throttle
+  }
+  else {
+    # PS 5.1: usar ThreadJobs con throttle manual
+    Write-Host "[INFO] Procesando en paralelo con ThreadJobs (PS5.1), Throttle=$Throttle"
+    try { Import-Module ThreadJob -ErrorAction Stop } catch { Write-Host "[WARN] ThreadJob no disponible, usaré Start-Job"; $useStartJob = $true }
+
+    $jobs = @()
+
+    foreach ($f in $Folders) {
+      # Mantener el throttle
+      while ( ($jobs | Where-Object { $_.State -eq 'Running' }).Count -ge $Throttle ) {
+        $done = Wait-Job -Job $jobs -Any -Timeout 2
+        if ($done) {
+          Receive-Job $done | ForEach-Object { Write-Host $_ }
+          Remove-Job  $done
+          $jobs = $jobs | Where-Object { $_.Id -ne $done.Id }
+        }
+      }
+
+      if (-not $useStartJob) {
+        $jobs += Start-ThreadJob -ScriptBlock {
+          param($Folder, $CommonParams)
+          Invoke-FolderWork @CommonParams -Folder $Folder
+        } -ArgumentList $f, $CommonParams
+      } else {
+        $jobs += Start-Job -ScriptBlock {
+          param($Folder, $CommonParams)
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
+          Invoke-FolderWork @CommonParams -Folder $Folder
+        } -ArgumentList $f, $CommonParams
+      }
     }
-    if($PreservePermissions){ $h['PreservePermissions']=$true }
-    & $UploadScript @h
-  } -ArgumentList @($UploadScript,$dir.FullName,$StorageAccount,$ShareName,$destSub,$Sas,$ServiceType,$Overwrite,$PreservePermissions,$AzCopyPath,$upLog,$MaxLogSizeMB)
 
-  #Registramos los jobs para resumen (opcional)
-  $jobPerFolder.TryAdd($name, [pscustomobject]@{ Inventory=$invJob; Upload=$uplJob }) | Out-Null
-
-  Wait-Job -Job @($invJob,$uplJob) | Receive-Job | Out-Null
-  Remove-Job -Job @($invJob,$uplJob) -Force | Out-Null
-
-  Write-Host "[$(TNow)][INFO] ($name) FINALIZADO inventario+subida."
-} -ThrottleLimit $throttle -ArgumentList @(
-  $InventoryScript,$UploadScript,$InventoryLogRoot,$UploadLogRoot,
-  $StorageAccount,$ShareName,$DestBaseSubPath,$Sas,$ServiceType,$Overwrite,
-  $PreservePermissions,$AzCopyPath,$MaxLogSizeMB,$ComputeRootSize,$jobPerFolder
-)
+    # Drenar todos
+    if ($jobs.Count) {
+      Wait-Job -Job $jobs | Out-Null
+      foreach ($j in $jobs) {
+        Receive-Job $j | ForEach-Object { Write-Host $_ }
+        Remove-Job  $j
+      }
+    }
+  }
+}
 
 Info "Procesamiento paralelo finalizado. Preparando resumen…"
 
