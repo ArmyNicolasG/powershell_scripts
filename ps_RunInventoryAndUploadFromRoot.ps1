@@ -1,48 +1,3 @@
-<#
-.SYNOPSIS
-  Orquestador: para cada subcarpeta inmediata:
-    - ejecuta inventario y subida en paralelo,
-    - centraliza logs,
-    - opcionalmente copia archivos sueltos de la raíz a "Archivos sueltos pre-migracion",
-    - al final genera un resumen consolidado.
-
-.PARAMETER RootPath
-  Carpeta raíz (local o UNC) que contiene las subcarpetas a procesar.
-
-.PARAMETER InventoryScript
-  Ruta del script de inventario (ps_GetFilesAndFoldersStructure_v2.ps1).
-
-.PARAMETER UploadScript
-  Ruta del script de subida (ps_UploadToFileShareFromCsv_v2.ps1 o vNext).
-
-.PARAMETER InventoryLogRoot
-  Carpeta base para logs de inventario (se creará <InventoryLogRoot>\<Subcarpeta>\...).
-
-.PARAMETER UploadLogRoot
-  Carpeta base para logs de subida (se creará <UploadLogRoot>\<Subcarpeta>\...).
-
-.PARAMETER StorageAccount, ShareName, DestBaseSubPath, Sas, ServiceType, Overwrite, PreservePermissions, AzCopyPath, MaxLogSizeMB
-  Passthrough al script de subida.
-
-.PARAMETER MaxParallel
-  Cuántas subcarpetas se procesan en paralelo (sin abrir ventanas). Default: 2.
-
-.PARAMETER OpenNewWindows
-  Si se indica, abre una ventana pwsh por carpeta y ejecuta inventario + subida allí
-  (en ese modo, este proceso no controla la concurrencia).
-
-.PARAMETER IncludeLooseFilesAsFolder
-  Si true (default), copia archivos sueltos de la raíz a "Archivos sueltos pre-migracion"
-  y procesa esa carpeta también.
-
-.PARAMETER ComputeRootSize
-  Pasa -ComputeRootSize al script de inventario.
-
-.OUTPUTS
-  Crea <UploadLogRoot>\summary.csv con columnas: Folder, Inv_* y Az_*.
-
-#>
-
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string]$RootPath,
@@ -131,12 +86,7 @@ Write-Host '=== ($name) FINALIZADO ===';
   return
 }
 
-# ---------------- Modo Paralelo ----------------
-$throttle = [Math]::Max(1,$MaxParallel)
-Info "Procesando en paralelo con Throttle=$throttle (inventario y subida en paralelo por carpeta)."
-
-$jobPerFolder = [System.Collections.Concurrent.ConcurrentDictionary[string,object]]::new()
-
+# ---------------- Función por carpeta (se inyecta al paralelo) ----------------
 function Invoke-FolderWork {
   param(
     [string]$Folder,
@@ -145,8 +95,9 @@ function Invoke-FolderWork {
     [string]$StorageAccount,  [string]$ShareName, [string]$DestBaseSubPath, [string]$Sas,
     [ValidateSet('FileShare','Blob')]$ServiceType = 'FileShare',
     [string]$AzCopyPath = 'azcopy',
-    [ValidateSet('ifSourceNewer','true','false','prompt')]$Overwrite = 'ifSourceNewer',
-    [switch]$PreservePermissions
+    [ValidateSet('ifSourceNewer','true','false','prompt')][string]$Overwrite = 'ifSourceNewer',
+    [switch]$PreservePermissions,
+    [int]$MaxLogSizeMB = 64
   )
 
   $folderName = Split-Path $Folder -Leaf
@@ -155,93 +106,86 @@ function Invoke-FolderWork {
   New-Item -ItemType Directory -Force -Path $invLogDir,$uplLogDir | Out-Null
 
   Write-Host "[INFO] [$folderName] Inventario -> $invLogDir"
-  $invArgs = @(
-    '-Path', $Folder,
-    '-LogDir', $invLogDir
-  )
+  $invArgs = @('-Path', $Folder, '-LogDir', $invLogDir)
   if ($ComputeRootSize) { $invArgs += '-ComputeRootSize' }
 
-  # Lanza INVENTARIO
   & $InventoryScript @invArgs 2>&1 | ForEach-Object { Write-Host $_ }
 
   Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
+  $destSub = ($using:DestBaseSubPath | ForEach-Object { $_ })  # asegurar captura
+  $destSub = $destSub  # noop
+  $destPath = ($Folder | Split-Path -Leaf) | ForEach-Object { $_ }
+  $destUrlSub = ($using:DestBaseSubPath) -replace '\\','/'
+  $destUrlSub = ($destUrlSub.TrimEnd('/')) + '/' + ($folderName -replace '\\','/')
+
   $uplArgs = @(
     '-SourceRoot', $Folder,
     '-StorageAccount', $StorageAccount,
     '-ShareName', $ShareName,
-    '-DestSubPath', (Join-Path $DestBaseSubPath $folderName -Resolve:$false) -replace '\\','/',
+    '-DestSubPath', $destUrlSub,
     '-Sas', $Sas,
     '-ServiceType', $ServiceType,
     '-LogDir', $uplLogDir,
     '-AzCopyPath', $AzCopyPath,
-    '-Overwrite', $Overwrite
+    '-Overwrite', $Overwrite,
+    '-MaxLogSizeMB', $MaxLogSizeMB
   )
   if ($PreservePermissions) { $uplArgs += '-PreservePermissions' }
 
-  # Lanza SUBIDA
   & $UploadScript @uplArgs 2>&1 | ForEach-Object { Write-Host $_ }
 
-  # Al terminar, devuelve un pequeño resumen por carpeta (el que ya construyes después puede reunirse de estos)
   [pscustomobject]@{ Folder = $Folder; Status = 'Done' }
 }
 
-# --- Ejecución paralela portable ---
-function Run-InParallelPortable {
-  param(
-    [string[]]$Folders,
-    [int]$Throttle = 2,
-    [Parameter(Mandatory)]$CommonParams  # hashtable con todos los params requeridos por Invoke-FolderWork
-  )
+# ---------------- Modo Paralelo (sin ventanas) ----------------
+$throttle = [Math]::Max(1,$MaxParallel)
+Info "Procesando en paralelo con Throttle=$throttle (inventario y subida en paralelo por carpeta)."
 
-  $isPS7 = $PSVersionTable.PSVersion.Major -ge 7
+# Paquete de parámetros comunes para inyectar al runspace paralelo
+$common = @{
+  InventoryScript     = $InventoryScript
+  InventoryLogRoot    = $InventoryLogRoot
+  ComputeRootSize     = $ComputeRootSize
+  UploadScript        = $UploadScript
+  UploadLogRoot       = $UploadLogRoot
+  StorageAccount      = $StorageAccount
+  ShareName           = $ShareName
+  DestBaseSubPath     = $DestBaseSubPath
+  Sas                 = $Sas
+  ServiceType         = $ServiceType
+  AzCopyPath          = $AzCopyPath
+  Overwrite           = $Overwrite
+  PreservePermissions = $PreservePermissions
+  MaxLogSizeMB        = $MaxLogSizeMB
+}
 
-  if ($isPS7) {
-    Write-Host "[INFO] Procesando en paralelo con PS7 (-Parallel), Throttle=$Throttle"
-    $Folders | ForEach-Object -Parallel {
-      Invoke-FolderWork @using:CommonParams -Folder $_
-    } -ThrottleLimit $Throttle
-  }
-  else {
-    # PS 5.1: usar ThreadJobs con throttle manual
-    Write-Host "[INFO] Procesando en paralelo con ThreadJobs (PS5.1), Throttle=$Throttle"
-    try { Import-Module ThreadJob -ErrorAction Stop } catch { Write-Host "[WARN] ThreadJob no disponible, usaré Start-Job"; $useStartJob = $true }
-
-    $jobs = @()
-
-    foreach ($f in $Folders) {
-      # Mantener el throttle
-      while ( ($jobs | Where-Object { $_.State -eq 'Running' }).Count -ge $Throttle ) {
-        $done = Wait-Job -Job $jobs -Any -Timeout 2
-        if ($done) {
-          Receive-Job $done | ForEach-Object { Write-Host $_ }
-          Remove-Job  $done
-          $jobs = $jobs | Where-Object { $_.Id -ne $done.Id }
-        }
-      }
-
-      if (-not $useStartJob) {
-        $jobs += Start-ThreadJob -ScriptBlock {
-          param($Folder, $CommonParams)
-          Invoke-FolderWork @CommonParams -Folder $Folder
-        } -ArgumentList $f, $CommonParams
-      } else {
-        $jobs += Start-Job -ScriptBlock {
-          param($Folder, $CommonParams)
-          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
-          Invoke-FolderWork @CommonParams -Folder $Folder
-        } -ArgumentList $f, $CommonParams
-      }
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+  # Inyectar la definición de la función en el runspace paralelo
+  $funcDef = ${function:Invoke-FolderWork}.Ast.Extent.Text
+  $folders | ForEach-Object -Parallel {
+    Invoke-Expression $using:funcDef
+    # $_ es un DirectoryInfo; pasamos la ruta
+    Invoke-FolderWork @using:common -Folder $_.FullName
+  } -ThrottleLimit $throttle
+}
+else {
+  # Compatibilidad PS 5.1 (ThreadJobs con throttle)
+  try { Import-Module ThreadJob -ErrorAction Stop } catch { Warn "ThreadJob no disponible; usando Start-Job." ; $useStartJob=$true }
+  $jobs=@()
+  foreach ($d in $folders) {
+    while ( ($jobs | Where-Object { $_.State -eq 'Running' }).Count -ge $throttle ) {
+      $done = Wait-Job -Job $jobs -Any -Timeout 2
+      if ($done) { Receive-Job $done | ForEach-Object { Write-Host $_ }; Remove-Job $done; $jobs = $jobs | Where-Object Id -ne $done.Id }
     }
-
-    # Drenar todos
-    if ($jobs.Count) {
-      Wait-Job -Job $jobs | Out-Null
-      foreach ($j in $jobs) {
-        Receive-Job $j | ForEach-Object { Write-Host $_ }
-        Remove-Job  $j
-      }
+    $scriptBlock = {
+      param($Folder,$Common,$FuncText)
+      Invoke-Expression $FuncText
+      Invoke-FolderWork @Common -Folder $Folder
     }
+    if ($useStartJob) { $jobs += Start-Job        -ScriptBlock $scriptBlock -ArgumentList $d.FullName, $common, (${function:Invoke-FolderWork}.Ast.Extent.Text) }
+    else              { $jobs += Start-ThreadJob  -ScriptBlock $scriptBlock -ArgumentList $d.FullName, $common, (${function:Invoke-FolderWork}.Ast.Extent.Text) }
   }
+  if ($jobs.Count) { Wait-Job -Job $jobs | Out-Null; foreach($j in $jobs){ Receive-Job $j | ForEach-Object { Write-Host $_ }; Remove-Job $j } }
 }
 
 Info "Procesamiento paralelo finalizado. Preparando resumen…"
@@ -250,54 +194,43 @@ Info "Procesamiento paralelo finalizado. Preparando resumen…"
 function Parse-FolderInfo([string]$folderLogDir){
   $p = Join-Path $folderLogDir 'folder-info.txt'
   if (-not (Test-Path -LiteralPath $p)) { return @{} }
-  $h=@{}
-  foreach($line in (Get-Content -LiteralPath $p -ErrorAction SilentlyContinue)){
-    if ($line -match '^\s*([^:]+):\s*(.*)\s*$'){
-      $h[$matches[1]] = $matches[2]
-    }
-  }
+  $h=@{}; foreach($line in (Get-Content -LiteralPath $p -ErrorAction SilentlyContinue)){ if ($line -match '^\s*([^:]+):\s*(.*)\s*$'){ $h[$matches[1]] = $matches[2] } }
   return $h
 }
-
 function Get-LatestUploadLog([string]$uploadFolder){
   if (-not (Test-Path -LiteralPath $uploadFolder)) { return $null }
-  $f = Get-ChildItem -LiteralPath $uploadFolder -File -Filter 'upload-logs-*.txt' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  return $f?.FullName
+  (Get-ChildItem -LiteralPath $uploadFolder -File -Filter 'upload-logs-*.txt' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)?.FullName
 }
-
 function Parse-AzCopySummary([string]$logPath){
   if (-not $logPath -or -not (Test-Path -LiteralPath $logPath)) { return @{} }
-  $h=@{}
-  $lines = Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue
+  $h=@{}; $lines = Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue
   $idx = ($lines | Select-String -SimpleMatch 'RESUMEN DE AZCOPY' | Select-Object -First 1).LineNumber
   if ($idx) {
     for($i=$idx; $i -lt $lines.Count; $i++){
       $l=$lines[$i]
-      if ($l -match '^\s*JobID:\s*(.+)$')               { $h['Az_JobID']=$matches[1].Trim() }
-      elseif ($l -match '^\s*Estado:\s*(.+)$')          { $h['Az_Status']=$matches[1].Trim() }
-      elseif ($l -match '^\s*Total transfers:\s*(\d+)'){ $h['Az_Total']=[int]$matches[1] }
-      elseif ($l -match '^\s*Completados:\s*(\d+)')     { $h['Az_Completed']=[int]$matches[1] }
-      elseif ($l -match '^\s*Fallidos:\s*(\d+)')        { $h['Az_Failed']=[int]$matches[1] }
-      elseif ($l -match '^\s*Saltados:\s*(\d+)')        { $h['Az_Skipped']=[int]$matches[1] }
-      elseif ($l -match '^\s*Bytes enviados:\s*(\d+)')  { $h['Az_Bytes']=[int64]$matches[1] }
-      elseif ($l -match '^\s*Duración \(s\):\s*([\d\.]+)'){ $h['Az_DurationSec']=[double]$matches[1] }
+      if     ($l -match '^\s*JobID:\s*(.+)$')                 { $h['Az_JobID']=$matches[1].Trim() }
+      elseif ($l -match '^\s*Estado:\s*(.+)$')                { $h['Az_Status']=$matches[1].Trim() }
+      elseif ($l -match '^\s*Total transfers:\s*(\d+)')       { $h['Az_Total']=[int]$matches[1] }
+      elseif ($l -match '^\s*Completados:\s*(\d+)')           { $h['Az_Completed']=[int]$matches[1] }
+      elseif ($l -match '^\s*Fallidos:\s*(\d+)')              { $h['Az_Failed']=[int]$matches[1] }
+      elseif ($l -match '^\s*Saltados:\s*(\d+)')              { $h['Az_Skipped']=[int]$matches[1] }
+      elseif ($l -match '^\s*Bytes enviados:\s*(\d+)')        { $h['Az_Bytes']=[int64]$matches[1] }
+      elseif ($l -match '^\s*Duración \(s\):\s*([\d\.]+)')    { $h['Az_DurationSec']=[double]$matches[1] }
     }
   }
   return $h
 }
 
 $summaryRows = New-Object System.Collections.Generic.List[object]
-
 foreach($dir in $folders){
   $name = $dir.Name
   $invLog = Join-Path $InventoryLogRoot $name
   $upLog  = Join-Path $UploadLogRoot $name
-
   $inv = Parse-FolderInfo $invLog
   $azp = Get-LatestUploadLog $upLog
   $az  = Parse-AzCopySummary $azp
 
-  $row = [pscustomobject]@{
+  $summaryRows.Add([pscustomobject]@{
     Folder                 = $name
     Inv_TotalFolders       = ($inv['TotalFolders'] ?? '')
     Inv_TotalFiles         = ($inv['TotalFiles'] ?? '')
@@ -316,14 +249,12 @@ foreach($dir in $folders){
     Az_DurationSec         = ($az['Az_DurationSec'] ?? '')
     Az_JobID               = ($az['Az_JobID'] ?? '')
     UploadLog              = $azp
-  }
-  $summaryRows.Add($row) | Out-Null
+  }) | Out-Null
 }
 
 $summaryCsv = Join-Path $UploadLogRoot 'summary.csv'
 $summaryRows | Export-Csv -LiteralPath $summaryCsv -NoTypeInformation -Encoding UTF8
 
-# Imprime una tabla compacta
 $summaryRows |
   Select-Object Folder,Inv_TotalFiles,Inv_AccessibleFiles,Inv_InaccessibleFiles,Inv_TotalBytes,
                 Az_Status,Az_Total,Az_Completed,Az_Failed,Az_Skipped,Az_Bytes,Az_DurationSec |
