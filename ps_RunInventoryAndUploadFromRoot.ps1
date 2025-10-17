@@ -114,16 +114,7 @@ if ($OpenNewWindows) {
     $name=$dir.Name; $safe=Sanitize-Name $name
     $invLog=Join-Path $InventoryLogRoot $safe; $upLog=Join-Path $UploadLogRoot $safe
     Ensure-Dir $invLog; Ensure-Dir $upLog
-    $base = ($DestBaseSubPath -replace '\\','/').Trim('/')
-    if ([string]::IsNullOrEmpty($base)) {
-        $destSub = $name
-    }
-    elseif ($base.Equals($name, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $destSub = $base
-    }
-    else {
-        $destSub = "$base/$name"
-    }
+    $destSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
 
     $cmd = @"
 `$ErrorActionPreference='Continue';
