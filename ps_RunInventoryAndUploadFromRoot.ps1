@@ -31,6 +31,9 @@
   Si se indica, abre una ventana pwsh por carpeta y ejecuta inventario + subida allí
   (en ese modo, este proceso no controla la concurrencia).
 
+.PARAMETER WindowLaunchDelaySeconds
+  Tiempo de espera (en segundos) antes de abrir una nueva ventana para cada subcarpeta. Default: 15s. (OpenNewWindows debe estar activo).
+
 .PARAMETER IncludeLooseFilesAsFolder
   Si true (default), copia archivos sueltos de la raíz a "Archivos sueltos pre-migracion"
   y procesa esa carpeta también.
@@ -65,6 +68,7 @@ param(
 
   [int]$MaxParallel = 2,
   [switch]$OpenNewWindows,
+  [int]$WindowLaunchDelaySeconds = 15,
   [switch]$IncludeLooseFilesAsFolder = $true,
   [switch]$ComputeRootSize
 )
@@ -124,10 +128,16 @@ Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
 & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB;
 Write-Host '=== ($name) FINALIZADO ===';
 "@
+
     Start-Process -FilePath $pwshExe -ArgumentList @('-NoLogo','-NoExit','-Command', $cmd) | Out-Null
     Info "Ventana lanzada para: $name"
+
+    # delay entre lanzamientos
+    if ($WindowLaunchDelaySeconds -gt 0) {
+      Start-Sleep -Seconds $WindowLaunchDelaySeconds
+    }
   }
-  Info "Se lanzaron $($folders.Count) ventanas. Cierra esta consola si quieres."
+  Info "Se lanzaron $($folders.Count) ventanas."
   return
 }
 
