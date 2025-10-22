@@ -43,28 +43,15 @@
 
 .PARAMETER AzCopyPath
   Ruta a azcopy.exe (si no, usa 'azcopy' del PATH).
+
 .PARAMETER NativeLogLevel
   Nivel de logs nativos de AzCopy (ERROR por defecto) para evitar ruido. Valores comunes: ERROR, INFO, WARNING, PANIC.
 
 .PARAMETER ConsoleOutputLevel
   Nivel de salida en consola (AzCopy): essential (default), quiet, info.
 
-.EXAMPLE
-  .\ps_UploadToFileShareFromCsv_vNext.ps1 `
-    -SourceRoot "\\192.168.98.19\UnidadX\1CONTABILIDAD\ESTADOS FINANCIEROS" `
-    -StorageAccount "itvstoragediscoxprd001" -ShareName "disco-x" -DestSubPath "/1CONTABILIDAD" `
-    -Sas "?sv=..." -ServiceType FileShare -PreservePermissions `
-    -AzCopyPath "C:\Tools\azcopy.exe" -LogDir "D:\logs\migracion\contabilidad"
-
-.EXAMPLE
-  .\ps_UploadToFileShareFromCsv_vNext.ps1 `
-    -SourceRoot "D:\export" `
-    -StorageAccount "miacct" -ShareName "backups" -DestSubPath "/2025" `
-    -Sas "sv=..." -ServiceType Blob `
-    -LogDir "D:\logs\migracion\backup-blob"
-    .PARAMETER GenerateStatusReports
+.PARAMETER GenerateStatusReports
   Si se indica, genera failed.txt, skipped.txt, completed.txt y summary.txt en -LogDir.
-
 #>
 
 [CmdletBinding()]
@@ -144,7 +131,7 @@ function Build-DestUrl {
   else                         { "https://$StorageAccount.file.core.windows.net/$ShareName$sub$sasT" }
 }
 
-# preparación comando
+# ---------- Entorno AzCopy ----------
 $AzNative = Join-Path $LogDir 'azcopy'
 Ensure-Directory -Dir $AzNative
 $env:AZCOPY_LOG_LOCATION = $AzNative
@@ -157,7 +144,6 @@ $args = @('copy', $src, $destUrl, '--recursive=true',
           "--overwrite=$Overwrite",
           '--output-level', $ConsoleOutputLevel,
           '--log-level', $NativeLogLevel)
-
 if ($IncludePaths -and $IncludePaths.Count -gt 0) {
   $args += @('--include-path', ($IncludePaths -join ';'))
 }
@@ -168,16 +154,12 @@ if ($ServiceType -eq 'FileShare' -and $PreservePermissions) {
 Write-Log "Destino: $destUrl"
 Write-Log ("Ejecutando: {0} {1}" -f $az, ($args -join ' '))
 
-#  capturar salida 
-$jobStart = Get-Date
+# ---------- Ejecución ----------
 $outLines = @()
-& $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object {
-  Write-Log $_ 'AZCOPY'
-} | Out-Null
-
+& $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object { Write-Log $_ 'AZCOPY' } | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN' }
 
-# resumen
+# ---------- Resumen legible ----------
 $summary = @{
   JobID=$null; Status=$null; TotalTransfers=$null; Completed=$null; Failed=$null; Skipped=$null;
   BytesTransferred=$null; Elapsed=$null
@@ -195,17 +177,73 @@ foreach ($ln in $outLines) {
 }
 
 Write-Log "===================== RESUMEN DE AZCOPY ====================="
-if ($summary.JobID)           { Write-Log ("JobID:               {0}" -f $summary.JobID) }
-if ($summary.Status)          { Write-Log ("Estado:              {0}" -f $summary.Status) }
-if ($summary.TotalTransfers)  { Write-Log ("Total transfers:     {0}" -f $summary.TotalTransfers) }
-if ($summary.Completed)       { Write-Log ("Completados:         {0}" -f $summary.Completed) }
-if ($summary.Failed -ne $null){ Write-Log ("Fallidos:            {0}" -f $summary.Failed) }
-if ($summary.Skipped -ne $null){Write-Log ("Saltados:            {0}" -f $summary.Skipped) }
-if ($summary.BytesTransferred){ Write-Log ("Bytes transferidos:  {0}" -f $summary.BytesTransferred) }
-if ($summary.Elapsed)         { Write-Log ("Duración:            {0}" -f $summary.Elapsed) }
+if ($summary.JobID)            { Write-Log ("JobID:               {0}" -f $summary.JobID) }
+if ($summary.Status)           { Write-Log ("Estado:              {0}" -f $summary.Status) }
+if ($summary.TotalTransfers)   { Write-Log ("Total transfers:     {0}" -f $summary.TotalTransfers) }
+if ($summary.Completed)        { Write-Log ("Completados:         {0}" -f $summary.Completed) }
+if ($summary.Failed -ne $null) { Write-Log ("Fallidos:            {0}" -f $summary.Failed) }
+if ($summary.Skipped -ne $null){ Write-Log ("Saltados:            {0}" -f $summary.Skipped) }
+if ($summary.BytesTransferred) { Write-Log ("Bytes transferidos:  {0}" -f $summary.BytesTransferred) }
+if ($summary.Elapsed)          { Write-Log ("Duración:            {0}" -f $summary.Elapsed) }
 Write-Log "============================================================="
 
-# ---------- Reportes por estado (TXT) usando jobs show JSON (solo para procesar) ----------
+# ---------- NUEVO: failed-transfers.csv ----------
+if ($summary.JobID) {
+  try {
+    $failedCsv = Join-Path $LogDir 'failed-transfers.csv'
+    $json = & $az jobs show $summary.JobID --with-status=Failed --output-type json 2>$null
+    $rows = foreach ($ln in $json) {
+      if ([string]::IsNullOrWhiteSpace($ln)) { continue }
+      try {
+        $o = $ln | ConvertFrom-Json -ErrorAction Stop
+        [pscustomobject]@{
+          Path   = $o.path ?? $o.Path ?? $o.Destination ?? $o.Source ?? $null
+          Status = $o.status ?? $o.Status ?? $o.TransferStatus ?? $null
+          Error  = $o.errorMsg ?? $o.ErrorMsg ?? $o.Error ?? $null
+        }
+      } catch { }
+    }
+    if ($rows) {
+      $rows | Export-Csv -LiteralPath $failedCsv -NoTypeInformation -Encoding UTF8
+      Write-Log "failed-transfers.csv -> $failedCsv"
+    } else {
+      # crea archivo vacío para que el orquestador pueda contar 0 de forma determinista
+      "" | Out-File -LiteralPath $failedCsv -Encoding UTF8
+      Write-Log "failed-transfers.csv -> $failedCsv (sin filas)"
+    }
+  } catch {
+    Write-Log "No se pudo generar failed-transfers.csv: $($_.Exception.Message)" 'WARN'
+  }
+}
+
+# ---------- NUEVO: dest-inventory.csv (inventario del destino) ----------
+try {
+  $destInv = Join-Path $LogDir 'dest-inventory.csv'
+  $listOut = & $az list $destUrl --recursive --output-type json 2>$null
+  $rows = foreach ($ln in $listOut) {
+    if ([string]::IsNullOrWhiteSpace($ln)) { continue }
+    try {
+      $o = $ln | ConvertFrom-Json -ErrorAction Stop
+      [pscustomobject]@{
+        Path         = $o.path ?? $o.name ?? $o.Path ?? $o.Name
+        EntityType   = $o.entityType ?? $o.EntityType
+        Bytes        = $o.contentLength ?? $o.ContentLength
+        LastModified = $o.lastModified ?? $o.LastModified
+      }
+    } catch { }
+  }
+  if ($rows) {
+    $rows | Export-Csv -LiteralPath $destInv -NoTypeInformation -Encoding UTF8
+    Write-Log "dest-inventory.csv -> $destInv"
+  } else {
+    "" | Out-File -LiteralPath $destInv -Encoding UTF8
+    Write-Log "dest-inventory.csv -> $destInv (sin filas)"
+  }
+} catch {
+  Write-Log "No se pudo generar dest-inventory.csv: $($_.Exception.Message)" 'WARN'
+}
+
+# ---------- Reportes TXT (si se solicitó) ----------
 if ($GenerateStatusReports -and $summary.JobID) {
   Write-Log "Generando reportes de estado (failed/skipped/completed) …"
   $jobId = $summary.JobID

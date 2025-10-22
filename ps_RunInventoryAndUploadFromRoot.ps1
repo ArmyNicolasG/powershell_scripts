@@ -42,8 +42,7 @@
   Pasa -ComputeRootSize al script de inventario.
 
 .OUTPUTS
-  Crea <UploadLogRoot>\summary.csv con columnas: Folder, Inv_* y Az_*.
-
+  Crea <UploadLogRoot>\summary.csv con columnas: Folder, Inv_* y Az_* + Diff/FailedCount.
 #>
 
 [CmdletBinding()]
@@ -131,11 +130,7 @@ Write-Host '=== ($name) FINALIZADO ===';
 
     Start-Process -FilePath $pwshExe -ArgumentList @('-NoLogo','-NoExit','-Command', $cmd) | Out-Null
     Info "Ventana lanzada para: $name"
-
-    # delay entre lanzamientos
-    if ($WindowLaunchDelaySeconds -gt 0) {
-      Start-Sleep -Seconds $WindowLaunchDelaySeconds
-    }
+    if ($WindowLaunchDelaySeconds -gt 0) { Start-Sleep -Seconds $WindowLaunchDelaySeconds }
   }
   Info "Se lanzaron $($folders.Count) ventanas."
   return
@@ -162,24 +157,19 @@ function Invoke-FolderWork {
 
   Write-Host "[INFO] [$folderName] Inventario -> $invLogDir"
 
-  # ==== FIX: splatting con hashtable (no arrays) ====
-  $invArgs = @{
-    Path    = $Folder
-    LogDir  = $invLogDir
-  }
+  $invArgs = @{ Path = $Folder; LogDir = $invLogDir }
   if ($ComputeRootSize) { $invArgs.ComputeRootSize = $true }
-
   & $InventoryScript @invArgs 2>&1 | ForEach-Object { Write-Host $_ }
 
   Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
 
+  # IMPORTANTE: no dupliques subcarpeta en destino
   $destUrlSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
-
   $uplArgs = @{
     SourceRoot        = $Folder
     StorageAccount    = $StorageAccount
     ShareName         = $ShareName
-    DestSubPath       = $destUrlSub
+    DestSubPath       = $destUrlSub  # <- sin añadir $folderName (el UploadScript ya recibe la carpeta concreta en SourceRoot)
     Sas               = $Sas
     ServiceType       = $ServiceType
     LogDir            = $uplLogDir
@@ -198,7 +188,6 @@ function Invoke-FolderWork {
 $throttle = [Math]::Max(1,$MaxParallel)
 Info "Procesando en paralelo con Throttle=$throttle (inventario y subida en paralelo por carpeta)."
 
-# Paquete de parámetros comunes para inyectar al runspace paralelo
 $common = @{
   InventoryScript     = $InventoryScript
   InventoryLogRoot    = $InventoryLogRoot
@@ -217,7 +206,6 @@ $common = @{
 }
 
 if ($PSVersionTable.PSVersion.Major -ge 7) {
-  # Inyectar la función en cada runspace
   $funcDef = ${function:Invoke-FolderWork}.Ast.Extent.Text
   $folders | ForEach-Object -Parallel {
     Invoke-Expression $using:funcDef
@@ -225,7 +213,6 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
   } -ThrottleLimit $throttle
 }
 else {
-  # Compatibilidad PS 5.1
   try { Import-Module ThreadJob -ErrorAction Stop } catch { Warn "ThreadJob no disponible; usando Start-Job." ; $useStartJob=$true }
   $jobs=@()
   foreach ($d in $folders) {
@@ -246,7 +233,7 @@ else {
 
 Info "Procesamiento paralelo finalizado. Preparando resumen…"
 
-# ---------------- Resumen final ----------------
+# ---------------- Utilidades de parsing/diff ----------------
 function Parse-FolderInfo([string]$folderLogDir){
   $p = Join-Path $folderLogDir 'folder-info.txt'
   if (-not (Test-Path -LiteralPath $p)) { return @{} }
@@ -277,14 +264,59 @@ function Parse-AzCopySummary([string]$logPath){
   return $h
 }
 
+function Get-FailedCount([string]$uploadFolder){
+  $p = Join-Path $uploadFolder 'failed-transfers.csv'
+  if (-not (Test-Path -LiteralPath $p)) { return 0 }
+  # cuenta filas de datos (si está vacío, 0)
+  $lines = Get-Content -LiteralPath $p -ErrorAction SilentlyContinue
+  if (-not $lines -or $lines.Count -eq 0) { return 0 }
+  # si tiene cabecera, réstala
+  return [Math]::Max(0, $lines.Count - 1)
+}
+
+function Compare-SourceDest([string]$invFolder,[string]$uploadFolder){
+  $srcCsv  = Join-Path $invFolder   'inventory.csv'
+  $dstCsv  = Join-Path $uploadFolder 'dest-inventory.csv'
+  $outMiss = Join-Path $uploadFolder 'diff_missing_in_dest.csv'
+  $outExtra= Join-Path $uploadFolder 'diff_extra_in_dest.csv'
+
+  if (-not (Test-Path -LiteralPath $srcCsv) -or -not (Test-Path -LiteralPath $dstCsv)) {
+    return @{ Missing=0; Extra=0 }
+  }
+
+  $src  = Import-Csv -LiteralPath $srcCsv  -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq 'File' }
+  $dest = Import-Csv -LiteralPath $dstCsv  -ErrorAction SilentlyContinue | Where-Object { $_.EntityType -eq 'File' }
+
+  # normaliza rutas
+  $srcFiles  = $src  | ForEach-Object { [pscustomobject]@{ Rel = ($_.Path -replace '\\','/'); Size = $_.FileSize } }
+  $destFiles = $dest | ForEach-Object { [pscustomobject]@{ Rel = ($_.Path -replace '\\','/'); Size = $_.Bytes } }
+
+  $srcSet  = $srcFiles.Rel
+  $destSet = $destFiles.Rel
+
+  $missing = $srcFiles  | Where-Object { $_.Rel -notin $destSet }
+  $extra   = $destFiles | Where-Object { $_.Rel -notin $srcSet  }
+
+  $missing | Export-Csv -LiteralPath $outMiss -NoTypeInformation -Encoding UTF8
+  $extra   | Export-Csv -LiteralPath $outExtra -NoTypeInformation -Encoding UTF8
+
+  return @{ Missing = @($missing).Count; Extra = @($extra).Count }
+}
+
+# ---------------- Resumen final ----------------
 $summaryRows = New-Object System.Collections.Generic.List[object]
 foreach($dir in $folders){
-  $name = $dir.Name
+  $name  = $dir.Name
   $invLog = Join-Path $InventoryLogRoot $name
-  $upLog  = Join-Path $UploadLogRoot $name
+  $upLog  = Join-Path $UploadLogRoot    $name
+
   $inv = Parse-FolderInfo $invLog
   $azp = Get-LatestUploadLog $upLog
   $az  = Parse-AzCopySummary $azp
+
+  # NUEVO: failed count y diff (source vs dest)
+  $failedCount = Get-FailedCount $upLog
+  $diff = Compare-SourceDest -invFolder $invLog -uploadFolder $upLog
 
   $summaryRows.Add([pscustomobject]@{
     Folder                 = $name
@@ -304,6 +336,9 @@ foreach($dir in $folders){
     Az_Bytes               = ($az['Az_Bytes'] ?? '')
     Az_DurationSec         = ($az['Az_DurationSec'] ?? '')
     Az_JobID               = ($az['Az_JobID'] ?? '')
+    FailedCount            = $failedCount
+    Diff_MissingCount      = $diff.Missing
+    Diff_ExtraCount        = $diff.Extra
     UploadLog              = $azp
   }) | Out-Null
 }
@@ -313,7 +348,8 @@ $summaryRows | Export-Csv -LiteralPath $summaryCsv -NoTypeInformation -Encoding 
 
 $summaryRows |
   Select-Object Folder,Inv_TotalFiles,Inv_AccessibleFiles,Inv_InaccessibleFiles,Inv_TotalBytes,
-                Az_Status,Az_Total,Az_Completed,Az_Failed,Az_Skipped,Az_Bytes,Az_DurationSec |
+                Az_Status,Az_Total,Az_Completed,Az_Failed,Az_Skipped,Az_Bytes,Az_DurationSec,
+                FailedCount,Diff_MissingCount,Diff_ExtraCount |
   Format-Table -AutoSize
 
 Info "Resumen CSV -> $summaryCsv"
