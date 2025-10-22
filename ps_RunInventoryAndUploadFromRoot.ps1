@@ -173,9 +173,7 @@ function Invoke-FolderWork {
 
   Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
 
-  # ==== FIX: usar parámetros de la función, sin $using:, y normalizar '/' ====
-  $destUrlSub = ($DestBaseSubPath -replace '\\','/').TrimEnd('/')
-  if ($destUrlSub) { $destUrlSub = "$destUrlSub/$folderName" } else { $destUrlSub = $folderName }
+  $destUrlSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
 
   $uplArgs = @{
     SourceRoot        = $Folder
