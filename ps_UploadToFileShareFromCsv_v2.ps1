@@ -254,5 +254,48 @@ if ($GenerateStatusReports) {
   Write-Log "summary.txt -> $sumPath"
 }
 
+# ---------- Anexar fila a resumen-consolidado de subidas ----------
+try {
+  $folderName = Split-Path -Path $SourceRoot -Leaf
+  $uploadRoot = Split-Path -Path $LogDir -Parent
+  $sumCsv     = Join-Path $uploadRoot 'resumen-subidas.csv'
+
+  # Mutex global para escrituras atómicas entre hilos/procesos
+  $mutex = [System.Threading.Mutex]::new($false, "global\upload_summary_mutex")
+  $null  = $mutex.WaitOne()
+
+  $mustHeader = -not (Test-Path -LiteralPath $sumCsv)
+  $row = [pscustomobject]@{
+    Subcarpeta          = $folderName
+    JobID               = $summary.JobID
+    Estado              = $summary.Status
+    TotalTransfers      = $summary.TotalTransfers
+    Completados         = $summary.TransfersCompleted
+    Fallidos            = $summary.TransfersFailed
+    Saltados            = $summary.TransfersSkipped
+    BytesTransferidos   = $summary.BytesTransferred
+    Duracion            = $summary.Elapsed
+    FechaHora           = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    LogWrapper          = $script:LogPath
+  }
+
+  # Escribir/Anexar sin cargar todo a memoria
+  $tmp = Join-Path $uploadRoot (".__tmp_{0}.csv" -f ([guid]::NewGuid()))
+  $row | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding UTF8
+  if ($mustHeader) {
+    Move-Item -LiteralPath $tmp -Destination $sumCsv -Force
+  } else {
+    # Quitar cabecera del tmp y anexar
+    $lines = Get-Content -LiteralPath $tmp
+    if ($lines.Count -gt 1) {
+      $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
+    }
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  }
+}
+finally {
+  if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
+}
+
 Write-Log "Logs nativos de AzCopy -> $AzNative"
 Write-Log ("Logs wrapper -> {0}-{1}.txt (rotación por {2} MB)" -f $LogPrefix,$script:LogIndex,$MaxLogSizeMB)

@@ -85,6 +85,13 @@ $root = (Resolve-Path -LiteralPath $RootPath).Path
 Ensure-Dir $InventoryLogRoot
 Ensure-Dir $UploadLogRoot
 
+# Preparación archivo .csv/tabla resumen
+$uploadSummaryCsv = Join-Path $UploadLogRoot 'resumen-subidas.csv'
+if (-not (Test-Path -LiteralPath $uploadSummaryCsv)) {
+  "Subcarpeta,JobID,Estado,TotalTransfers,Completados,Fallidos,Saltados,BytesTransferidos,Duracion,FechaHora,LogWrapper" |
+    Out-File -LiteralPath $uploadSummaryCsv -Encoding UTF8
+}
+
 # Archivos sueltos a subcarpeta
 $looseFolder = Join-Path $root 'Archivos sueltos pre-migracion'
 if ($IncludeLooseFilesAsFolder) {
@@ -163,13 +170,13 @@ function Invoke-FolderWork {
 
   Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
 
-  # IMPORTANTE: no dupliques subcarpeta en destino
+  # IMPORTANTE: no duplicar subcarpeta en destino
   $destUrlSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
   $uplArgs = @{
     SourceRoot        = $Folder
     StorageAccount    = $StorageAccount
     ShareName         = $ShareName
-    DestSubPath       = $destUrlSub  # <- sin añadir $folderName (el UploadScript ya recibe la carpeta concreta en SourceRoot)
+    DestSubPath       = $destUrlSub  
     Sas               = $Sas
     ServiceType       = $ServiceType
     LogDir            = $uplLogDir
