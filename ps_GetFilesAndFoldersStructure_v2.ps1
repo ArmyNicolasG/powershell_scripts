@@ -532,3 +532,58 @@ Write-Log "CSV  -> $OutCsvDenied (solo denegados)"   # NUEVO
 Write-Log "LOG  -> $LogPath"
 Write-Log "INFO -> $InfoTxt"
 if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
+
+
+# ===== CSV centralizado de inventarios (compatible Excel) =====
+try {
+  # Carpeta de la subcarpeta (nombre visible) y raíz del log de inventario
+  $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
+  $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))
+  $sumCsv      = Join-Path $invRoot 'resumen-conciliaciones.csv'
+
+  # Cálculo en GB con más precisión
+  [int64]$bytes = $TotalBytes
+  [double]$gb   = 0
+  if ($bytes -gt 0) { $gb = [math]::Round(([double]$bytes / 1073741824), 6) }
+
+  # Fila a escribir (propiedades = encabezados). ¡Sin “ñ”!
+  $row = [pscustomobject]@{
+    'Subcarpeta'               = $subcarpeta
+    'Tamano_Bytes'             = $bytes
+    'Tamano_GB'                = $gb
+    'Carpetas_inaccesibles'    = $InaccessibleFolders
+    'Carpetas_accesibles'      = $AccessibleFolders
+    'Archivos_accesibles'      = $AccessibleFiles
+    'Archivos_inaccesibles'    = $InaccessibleFiles
+  }
+
+  # Mutex global para escrituras concurrentes seguras
+  $mutex = [System.Threading.Mutex]::new($false, 'Global\inventory_summary_mutex')
+  $null  = $mutex.WaitOne()
+
+  # Si no existe, escribimos cabecera con UTF-8 BOM; luego anexamos sin cabecera
+  $mustHeader = -not (Test-Path -LiteralPath $sumCsv)
+
+  # Exportamos a un temporal en UTF-8 BOM y ; como separador
+  $tmp = Join-Path $invRoot (".__tmp_inv_{0}.csv" -f ([guid]::NewGuid()))
+  $row | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding utf8BOM -Delimiter ';'
+
+  if ($mustHeader) {
+    Move-Item -LiteralPath $tmp -Destination $sumCsv -Force
+  } else {
+    # Quitamos cabecera del temporal y anexamos sus filas al CSV maestro
+    $lines = Get-Content -LiteralPath $tmp
+    if ($lines.Count -gt 1) {
+      # El archivo maestro ya tiene BOM en la primera línea; las anexadas pueden ir sin BOM.
+      $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
+    }
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  }
+}
+catch {
+  Write-Log "WARN: No se pudo actualizar resumen-conciliaciones.csv -> $($_.Exception.Message)" 'WARN'
+}
+finally {
+  if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
+}
+# ===== FIN CSV centralizado de inventarios =====

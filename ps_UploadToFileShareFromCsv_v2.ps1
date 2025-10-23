@@ -178,32 +178,43 @@ $summary = @{
   Elapsed                 = $null
 }
 
-foreach ($ln in $outLines) {
-  # Job
-  if ($ln -match 'Job\s+([0-9a-fA-F-]{8,})\s+has started') { $summary.JobID = $Matches[1] }
+[int]$filesCompleted=0;   [int]$foldersCompleted=0
+[int]$filesFailed=0;      [int]$foldersFailed=0
+[int]$filesSkipped=0;     [int]$foldersSkipped=0
 
-  # Estado final
+foreach ($ln in $outLines) {
+  # Job y estado
+  if ($ln -match 'Job\s+([0-9a-fA-F-]{8,})\s+has started') { $summary.JobID = $Matches[1] }
   if ($ln -match '^\s*Final Job Status:\s*(.+)$')          { $summary.Status = $Matches[1].Trim() }
 
-  # Totales (no sobrescribir: cada campo al suyo)
-  if ($ln -match '^\s*Total Number of Transfers:\s*(\d+)') { $summary.TotalTransfers = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of File Transfers:\s*(\d+)')  { $summary.FileTransfers = [int]$Matches[1] }
+  # Totales
+  if ($ln -match '^\s*Total Number of Transfers:\s*(\d+)') { $summary.TotalTransfers          = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of File Transfers:\s*(\d+)')  { $summary.FileTransfers           = [int]$Matches[1] }
   if ($ln -match '^\s*Number of Folder Property Transfers:\s*(\d+)') { $summary.FolderPropertyTransfers = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of Symlink Transfers:\s*(\d+)') { $summary.SymlinkTransfers = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Symlink Transfers:\s*(\d+)'){ $summary.SymlinkTransfers        = [int]$Matches[1] }
 
-  # Resultados por estado
-  if ($ln -match '^\s*Number of Transfers Completed:\s*(\d+)') { $summary.TransfersCompleted = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of Transfers Failed:\s*(\d+)')    { $summary.TransfersFailed    = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of Transfers Skipped:\s*(\d+)')   { $summary.TransfersSkipped   = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of Folders Processed:\s*(\d+)')   { $summary.FoldersCompleted   = [int]$Matches[1] }  # algunas versiones
+  # Resultados por estado (sumamos File+Folder para el total combinado)
+  if ($ln -match '^\s*Number of File Transfers Completed:\s*(\d+)')   { $filesCompleted    = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Folder Transfers Completed:\s*(\d+)') { $foldersCompleted  = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of File Transfers Failed:\s*(\d+)')      { $filesFailed       = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Folder Transfers Failed:\s*(\d+)')    { $foldersFailed     = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of File Transfers Skipped:\s*(\d+)')     { $filesSkipped      = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Folder Transfers Skipped:\s*(\d+)')   { $foldersSkipped    = [int]$Matches[1] }
 
-  # Bytes / tiempo / % (según versión/idioma)
-  if ($ln -match '^\s*Total Bytes Transferred:\s*(\d+)')       { $summary.BytesTransferred = [int64]$Matches[1] }
-  if ($ln -match '^\s*Bytes Over Wire:\s*(\d+)')               { $summary.BytesOverWire    = [int64]$Matches[1] }
-  if ($ln -match '^\s*Total Bytes Expected:\s*(\d+)')          { $summary.BytesExpected    = [int64]$Matches[1] }
-  if ($ln -match '^\s*Percent Complete:\s*(\d+)%')             { $summary.PercentComplete  = [int]$Matches[1] }
-  if ($ln -match '^\s*Elapsed Time:\s*(.+)$')                  { $summary.Elapsed          = $Matches[1].Trim() }
+  # Bytes (aceptamos con o sin “Number of”)
+  if ($ln -match '^\s*Total (Number of )?Bytes Transferred:\s*(\d+)') { $summary.BytesTransferred = [int64]$Matches[2] }
+
+  # % (si aparece)
+  if ($ln -match '^\s*Percent Complete:\s*(\d+)%')                    { $summary.PercentComplete  = [int]$Matches[1] }
+
+  # Duración (con o sin paréntesis, guardamos tal cual)
+  if ($ln -match '^\s*Elapsed Time(?:\s*\([^)]+\))?:\s*(.+)$')        { $summary.Elapsed          = $Matches[1].Trim() }
 }
+
+# Combina para llenar las columnas del CSV
+$summary.TransfersCompleted = $filesCompleted  + $foldersCompleted
+$summary.TransfersFailed    = $filesFailed     + $foldersFailed
+$summary.TransfersSkipped   = $filesSkipped    + $foldersSkipped
 
 # Coherencia básica (solo aviso en log, no falla el run)
 $checkOk = $false
@@ -254,48 +265,51 @@ if ($GenerateStatusReports) {
   Write-Log "summary.txt -> $sumPath"
 }
 
-# ---------- Anexar fila a resumen-consolidado de subidas ----------
+## ---------- Anexar fila a resumen-consolidado de subidas ----------
 try {
   $folderName = Split-Path -Path $SourceRoot -Leaf
   $uploadRoot = Split-Path -Path $LogDir -Parent
   $sumCsv     = Join-Path $uploadRoot 'resumen-subidas.csv'
 
-  # Mutex global para escrituras atómicas entre hilos/procesos
-  $mutex = [System.Threading.Mutex]::new($false, "global\upload_summary_mutex")
+  # Garantiza cabecera
+  if (-not (Test-Path -LiteralPath $sumCsv)) {
+    'Subcarpeta,JobID,Estado,TotalTransfers,Completados,Fallidos,Saltados,BytesTransferidos,Duracion,FechaHora,LogWrapper' |
+      Out-File -LiteralPath $sumCsv -Encoding UTF8
+  }
+
+  # Mutex (Global -> fallback a local si falla)
+  $mutex = $null
+  try   { $mutex = [System.Threading.Mutex]::new($false, 'Global\upload_summary_mutex') }
+  catch { $mutex = [System.Threading.Mutex]::new($false, 'upload_summary_mutex') }
   $null  = $mutex.WaitOne()
 
-  $mustHeader = -not (Test-Path -LiteralPath $sumCsv)
   $row = [pscustomobject]@{
-    Subcarpeta          = $folderName
-    JobID               = $summary.JobID
-    Estado              = $summary.Status
-    TotalTransfers      = $summary.TotalTransfers
-    Completados         = $summary.TransfersCompleted
-    Fallidos            = $summary.TransfersFailed
-    Saltados            = $summary.TransfersSkipped
-    BytesTransferidos   = $summary.BytesTransferred
-    Duracion            = $summary.Elapsed
-    FechaHora           = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    LogWrapper          = $script:LogPath
+    Subcarpeta        = $folderName
+    JobID             = $summary.JobID
+    Estado            = $summary.Status
+    TotalTransfers    = $summary.TotalTransfers
+    Completados       = $summary.TransfersCompleted
+    Fallidos          = $summary.TransfersFailed
+    Saltados          = $summary.TransfersSkipped
+    BytesTransferidos = $summary.BytesTransferred
+    Duracion          = $summary.Elapsed
+    FechaHora         = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    LogWrapper        = $script:LogPath
   }
 
-  # Escribir/Anexar sin cargar todo a memoria
+  # Append (sin duplicar cabecera)
   $tmp = Join-Path $uploadRoot (".__tmp_{0}.csv" -f ([guid]::NewGuid()))
   $row | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding UTF8
-  if ($mustHeader) {
-    Move-Item -LiteralPath $tmp -Destination $sumCsv -Force
-  } else {
-    # Quitar cabecera del tmp y anexar
-    $lines = Get-Content -LiteralPath $tmp
-    if ($lines.Count -gt 1) {
-      $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
-    }
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  $lines = Get-Content -LiteralPath $tmp
+  if ($lines.Count -gt 1) {
+    $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
   }
+  Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
 }
 finally {
   if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
 }
+
 
 Write-Log "Logs nativos de AzCopy -> $AzNative"
 Write-Log ("Logs wrapper -> {0}-{1}.txt (rotación por {2} MB)" -f $LogPrefix,$script:LogIndex,$MaxLogSizeMB)

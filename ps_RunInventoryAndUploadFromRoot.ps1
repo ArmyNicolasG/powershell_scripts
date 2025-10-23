@@ -41,6 +41,12 @@
 .PARAMETER ComputeRootSize
   Pasa -ComputeRootSize al script de inventario.
 
+.PARAMETER DoUpload
+  Si se indica, ejecuta el script de subida, sino, no se ejecutará ninguna subida.
+
+.PARAMETER DoInventory
+  Si se indica, ejecuta el script de inventario, sino, no se ejecutará ninguna operación de inventario.
+
 .OUTPUTS
   Crea <UploadLogRoot>\summary.csv con columnas: Folder, Inv_* y Az_* + Diff/FailedCount.
 #>
@@ -69,8 +75,14 @@ param(
   [switch]$OpenNewWindows,
   [int]$WindowLaunchDelaySeconds = 15,
   [switch]$IncludeLooseFilesAsFolder = $true,
-  [switch]$ComputeRootSize
+  [switch]$ComputeRootSize,
+  [switch]$DoInventory,   # default: false
+  [switch]$DoUpload      # default: false
+
 )
+
+
+
 
 # ---------------- Helpers ----------------
 function Ensure-Dir([string]$p){ if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null } }
@@ -80,17 +92,20 @@ function Now() { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff') }
 function Info([string]$m){ Write-Host "[$(Now)][INFO] $m" }
 function Warn([string]$m){ Write-Host "[$(Now)][WARN] $m" -ForegroundColor Yellow }
 
+# --- Validación de intención ---
+if (-not $DoInventory -and -not $DoUpload) {
+   Warn "No se ejecutará nada: faltan flags. Usa -DoInventory y/o -DoUpload."
+   Warn "Ejemplos:"
+   Warn "  - Solo inventario: .\ps_RunInventoryAndUploadFromRoot.ps1 ... -DoInventory"
+   Warn "  - Solo subida:     .\ps_RunInventoryAndUploadFromRoot.ps1 ... -DoUpload"
+   Warn "  - Ambos:           .\ps_RunInventoryAndUploadFromRoot.ps1 ... -DoInventory -DoUpload"
+  return
+}
+
 # ---------------- Preparación raíz ----------------
 $root = (Resolve-Path -LiteralPath $RootPath).Path
 Ensure-Dir $InventoryLogRoot
 Ensure-Dir $UploadLogRoot
-
-# Preparación archivo .csv/tabla resumen
-$uploadSummaryCsv = Join-Path $UploadLogRoot 'resumen-subidas.csv'
-if (-not (Test-Path -LiteralPath $uploadSummaryCsv)) {
-  "Subcarpeta,JobID,Estado,TotalTransfers,Completados,Fallidos,Saltados,BytesTransferidos,Duracion,FechaHora,LogWrapper" |
-    Out-File -LiteralPath $uploadSummaryCsv -Encoding UTF8
-}
 
 # Archivos sueltos a subcarpeta
 $looseFolder = Join-Path $root 'Archivos sueltos pre-migracion'
@@ -126,12 +141,10 @@ if ($OpenNewWindows) {
     Ensure-Dir $invLog; Ensure-Dir $upLog
     $destSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
 
-    $cmd = @"
+$cmd = @"
 `$ErrorActionPreference='Continue';
-Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ===';
-& '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'});
-Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
-& '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB;
+$(if($DoInventory){ "Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ==='; `n& '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'}); `n" })
+$(if($DoUpload){    "Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';    `n& '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB; `n" })
 Write-Host '=== ($name) FINALIZADO ===';
 "@
 
@@ -154,7 +167,9 @@ function Invoke-FolderWork {
     [string]$AzCopyPath = 'azcopy',
     [ValidateSet('ifSourceNewer','true','false','prompt')][string]$Overwrite = 'ifSourceNewer',
     [switch]$PreservePermissions,
-    [int]$MaxLogSizeMB = 64
+    [int]$MaxLogSizeMB = 64,
+    [switch]$DoInventory,
+    [switch]$DoUpload
   )
 
   $folderName = Split-Path $Folder -Leaf
@@ -162,34 +177,35 @@ function Invoke-FolderWork {
   $uplLogDir  = Join-Path $UploadLogRoot    $folderName
   New-Item -ItemType Directory -Force -Path $invLogDir,$uplLogDir | Out-Null
 
-  Write-Host "[INFO] [$folderName] Inventario -> $invLogDir"
-
-  $invArgs = @{ Path = $Folder; LogDir = $invLogDir }
-  if ($ComputeRootSize) { $invArgs.ComputeRootSize = $true }
-  & $InventoryScript @invArgs 2>&1 | ForEach-Object { Write-Host $_ }
-
-  Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
-
-  # IMPORTANTE: no duplicar subcarpeta en destino
-  $destUrlSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
-  $uplArgs = @{
-    SourceRoot        = $Folder
-    StorageAccount    = $StorageAccount
-    ShareName         = $ShareName
-    DestSubPath       = $destUrlSub  
-    Sas               = $Sas
-    ServiceType       = $ServiceType
-    LogDir            = $uplLogDir
-    AzCopyPath        = $AzCopyPath
-    Overwrite         = $Overwrite
-    MaxLogSizeMB      = $MaxLogSizeMB
+  if ($DoInventory) {
+    Write-Host "[INFO] [$folderName] Inventario -> $invLogDir"
+    $invArgs = @{ Path = $Folder; LogDir = $invLogDir }
+    if ($ComputeRootSize) { $invArgs.ComputeRootSize = $true }
+    & $InventoryScript @invArgs 2>&1 | ForEach-Object { Write-Host $_ }
   }
-  if ($PreservePermissions) { $uplArgs.PreservePermissions = $true }
 
-  & $UploadScript @uplArgs 2>&1 | ForEach-Object { Write-Host $_ }
+  if ($DoUpload) {
+    Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
+    $destUrlSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
+    $uplArgs = @{
+      SourceRoot        = $Folder
+      StorageAccount    = $StorageAccount
+      ShareName         = $ShareName
+      DestSubPath       = $destUrlSub
+      Sas               = $Sas
+      ServiceType       = $ServiceType
+      LogDir            = $uplLogDir
+      AzCopyPath        = $AzCopyPath
+      Overwrite         = $Overwrite
+      MaxLogSizeMB      = $MaxLogSizeMB
+    }
+    if ($PreservePermissions) { $uplArgs.PreservePermissions = $true }
+    & $UploadScript @uplArgs 2>&1 | ForEach-Object { Write-Host $_ }
+  }
 
   [pscustomobject]@{ Folder = $Folder; Status = 'Done' }
 }
+
 
 # ---------------- Modo Paralelo (sin ventanas) ----------------
 $throttle = [Math]::Max(1,$MaxParallel)
@@ -210,7 +226,10 @@ $common = @{
   Overwrite           = $Overwrite
   PreservePermissions = $PreservePermissions
   MaxLogSizeMB        = $MaxLogSizeMB
+  DoInventory         = $DoInventory
+  DoUpload            = $DoUpload
 }
+
 
 if ($PSVersionTable.PSVersion.Major -ge 7) {
   $funcDef = ${function:Invoke-FolderWork}.Ast.Extent.Text
@@ -258,18 +277,19 @@ function Parse-AzCopySummary([string]$logPath){
   if ($idx) {
     for($i=$idx; $i -lt $lines.Count; $i++){
       $l=$lines[$i]
-      if     ($l -match '^\s*JobID:\s*(.+)$')                 { $h['Az_JobID']=$matches[1].Trim() }
-      elseif ($l -match '^\s*Estado:\s*(.+)$')                { $h['Az_Status']=$matches[1].Trim() }
-      elseif ($l -match '^\s*Total transfers:\s*(\d+)')       { $h['Az_Total']=[int]$matches[1] }
-      elseif ($l -match '^\s*Completados:\s*(\d+)')           { $h['Az_Completed']=[int]$matches[1] }
-      elseif ($l -match '^\s*Fallidos:\s*(\d+)')              { $h['Az_Failed']=[int]$matches[1] }
-      elseif ($l -match '^\s*Saltados:\s*(\d+)')              { $h['Az_Skipped']=[int]$matches[1] }
-      elseif ($l -match '^\s*Bytes enviados:\s*(\d+)')        { $h['Az_Bytes']=[int64]$matches[1] }
-      elseif ($l -match '^\s*Duración \(s\):\s*([\d\.]+)')    { $h['Az_DurationSec']=[double]$matches[1] }
+      if     ($l -match '^\s*JobID:\s*(.+)$')                    { $h['Az_JobID']=$matches[1].Trim() }
+      elseif ($l -match '^\s*Estado:\s*(.+)$')                   { $h['Az_Status']=$matches[1].Trim() }
+      elseif ($l -match '^\s*Total transfers:\s*(\d+)')          { $h['Az_Total']=[int]$matches[1] }
+      elseif ($l -match '^\s*Completados:\s*(\d+)')              { $h['Az_Completed']=[int]$matches[1] }
+      elseif ($l -match '^\s*Fallidos:\s*(\d+)')                 { $h['Az_Failed']=[int]$matches[1] }
+      elseif ($l -match '^\s*Saltados:\s*(\d+)')                 { $h['Az_Skipped']=[int]$matches[1] }
+      elseif ($l -match '^\s*Bytes transferidos:\s*(\d+)')       { $h['Az_Bytes']=[int64]$matches[1] }
+      elseif ($l -match '^\s*Duración:\s*([0-9\.\:]+.*)$')       { $h['Az_DurationSec']=$matches[1].Trim() }  # dejamos el string tal cual
     }
   }
   return $h
 }
+
 
 function Get-FailedCount([string]$uploadFolder){
   $p = Join-Path $uploadFolder 'failed-transfers.csv'
