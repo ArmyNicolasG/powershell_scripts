@@ -161,140 +161,82 @@ if ($LASTEXITCODE -ne 0) { Write-Log "AzCopy devolvió código $LASTEXITCODE." '
 
 # ---------- Resumen legible (totales combinados) ----------
 $summary = @{
-  JobID=$null; Status=$null; TotalTransfers=$null; Completed=$null; Failed=$null; Skipped=$null;
-  BytesTransferred=$null; Elapsed=$null
+  JobID                   = $null
+  Status                  = $null
+  TotalTransfers          = $null
+  FileTransfers           = $null
+  FolderPropertyTransfers = $null
+  SymlinkTransfers        = $null
+  TransfersCompleted      = $null
+  TransfersFailed         = $null
+  TransfersSkipped        = $null
+  FoldersCompleted        = $null
+  BytesTransferred        = $null
+  BytesOverWire           = $null
+  BytesExpected           = $null
+  PercentComplete         = $null
+  Elapsed                 = $null
 }
+
 foreach ($ln in $outLines) {
+  # Job
   if ($ln -match 'Job\s+([0-9a-fA-F-]{8,})\s+has started') { $summary.JobID = $Matches[1] }
+
+  # Estado final
   if ($ln -match '^\s*Final Job Status:\s*(.+)$')          { $summary.Status = $Matches[1].Trim() }
+
+  # Totales (no sobrescribir: cada campo al suyo)
   if ($ln -match '^\s*Total Number of Transfers:\s*(\d+)') { $summary.TotalTransfers = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of File Transfers:\s*(\d+)')  { $summary.TotalTransfers = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of Transfers Completed:\s*(\d+)') { $summary.Completed = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of Transfers Failed:\s*(\d+)')    { $summary.Failed = [int]$Matches[1] }
-  if ($ln -match '^\s*Number of Transfers Skipped:\s*(\d+)')   { $summary.Skipped = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of File Transfers:\s*(\d+)')  { $summary.FileTransfers = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Folder Property Transfers:\s*(\d+)') { $summary.FolderPropertyTransfers = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Symlink Transfers:\s*(\d+)') { $summary.SymlinkTransfers = [int]$Matches[1] }
+
+  # Resultados por estado
+  if ($ln -match '^\s*Number of Transfers Completed:\s*(\d+)') { $summary.TransfersCompleted = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Transfers Failed:\s*(\d+)')    { $summary.TransfersFailed    = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Transfers Skipped:\s*(\d+)')   { $summary.TransfersSkipped   = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Folders Processed:\s*(\d+)')   { $summary.FoldersCompleted   = [int]$Matches[1] }  # algunas versiones
+
+  # Bytes / tiempo / % (según versión/idioma)
   if ($ln -match '^\s*Total Bytes Transferred:\s*(\d+)')       { $summary.BytesTransferred = [int64]$Matches[1] }
-  if ($ln -match '^\s*Elapsed Time:\s*(.+)$')                  { $summary.Elapsed = $Matches[1].Trim() }
+  if ($ln -match '^\s*Bytes Over Wire:\s*(\d+)')               { $summary.BytesOverWire    = [int64]$Matches[1] }
+  if ($ln -match '^\s*Total Bytes Expected:\s*(\d+)')          { $summary.BytesExpected    = [int64]$Matches[1] }
+  if ($ln -match '^\s*Percent Complete:\s*(\d+)%')             { $summary.PercentComplete  = [int]$Matches[1] }
+  if ($ln -match '^\s*Elapsed Time:\s*(.+)$')                  { $summary.Elapsed          = $Matches[1].Trim() }
+}
+
+# Coherencia básica (solo aviso en log, no falla el run)
+$checkOk = $false
+if ($summary.TotalTransfers -ne $null -and
+    $summary.TransfersCompleted -ne $null -and
+    $summary.TransfersFailed -ne $null -and
+    $summary.TransfersSkipped -ne $null) {
+  $sumStates = $summary.TransfersCompleted + $summary.TransfersFailed + $summary.TransfersSkipped
+  $checkOk = ($sumStates -eq $summary.TotalTransfers)
+  if (-not $checkOk) {
+    Write-Log ("ADVERTENCIA: Completed+Failed+Skipped ({0}) != TotalTransfers ({1})" -f $sumStates, $summary.TotalTransfers) 'WARN'
+  }
 }
 
 Write-Log "===================== RESUMEN DE AZCOPY ====================="
-if ($summary.JobID)            { Write-Log ("JobID:               {0}" -f $summary.JobID) }
-if ($summary.Status)           { Write-Log ("Estado:              {0}" -f $summary.Status) }
-if ($summary.TotalTransfers)   { Write-Log ("Total transfers:     {0}" -f $summary.TotalTransfers) }
-if ($summary.Completed)        { Write-Log ("Completados:         {0}" -f $summary.Completed) }
-if ($summary.Failed -ne $null) { Write-Log ("Fallidos:            {0}" -f $summary.Failed) }
-if ($summary.Skipped -ne $null){ Write-Log ("Saltados:            {0}" -f $summary.Skipped) }
-if ($summary.BytesTransferred) { Write-Log ("Bytes transferidos:  {0}" -f $summary.BytesTransferred) }
-if ($summary.Elapsed)          { Write-Log ("Duración:            {0}" -f $summary.Elapsed) }
+if ($summary.JobID -ne $null)            { Write-Log ("JobID:                 {0}" -f $summary.JobID) }
+if ($summary.Status)                      { Write-Log ("Estado:                {0}" -f $summary.Status) }
+if ($summary.TotalTransfers -ne $null)    { Write-Log ("Total transfers:       {0}" -f $summary.TotalTransfers) }
+if ($summary.FileTransfers -ne $null)     { Write-Log ("  ├─ Files:            {0}" -f $summary.FileTransfers) }
+if ($summary.FolderPropertyTransfers -ne $null) { Write-Log ("  ├─ Folder props:     {0}" -f $summary.FolderPropertyTransfers) }
+if ($summary.SymlinkTransfers -ne $null)  { Write-Log ("  └─ Symlinks:         {0}" -f $summary.SymlinkTransfers) }
+
+if ($summary.TransfersCompleted -ne $null){ Write-Log ("Completados:           {0}" -f $summary.TransfersCompleted) }
+if ($summary.TransfersFailed -ne $null)   { Write-Log ("Fallidos:              {0}" -f $summary.TransfersFailed) }
+if ($summary.TransfersSkipped -ne $null)  { Write-Log ("Saltados:              {0}" -f $summary.TransfersSkipped) }
+
+if ($summary.BytesTransferred -ne $null)  { Write-Log ("Bytes transferidos:    {0}" -f $summary.BytesTransferred) }
+if ($summary.BytesOverWire   -ne $null)   { Write-Log ("Bytes sobre la red:    {0}" -f $summary.BytesOverWire) }
+if ($summary.BytesExpected   -ne $null)   { Write-Log ("Bytes esperados:       {0}" -f $summary.BytesExpected) }
+if ($summary.PercentComplete -ne $null)   { Write-Log ("Porcentaje completado: {0}%" -f $summary.PercentComplete) }
+if ($summary.Elapsed)                     { Write-Log ("Duración:              {0}" -f $summary.Elapsed) }
 Write-Log "============================================================="
 
-# ---------- Reportes por tipo/estado desde logs nativos (sin jobs/list) ----------
-if ($GenerateStatusReports) {
-  # Aviso: para obtener eventos Completed/Skipped por elemento, usa -NativeLogLevel INFO
-  if ($NativeLogLevel -ne 'INFO') {
-    Write-Log "Advertencia: NativeLogLevel=$NativeLogLevel. Para CSV detallados por elemento, usa -NativeLogLevel INFO." 'WARN'
-  }
-
-  # Encuentra el log nativo más reciente tras esta ejecución
-  $latestNative = Get-ChildItem -LiteralPath $AzNative -File -ErrorAction SilentlyContinue |
-                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $latestNative) {
-    Write-Log "No se encontró log nativo en '$AzNative'." 'WARN'
-  }
-  else {
-    Write-Log "Analizando log nativo: $($latestNative.FullName)"
-
-    $csvMap = @{
-      'File|Completed'   = (Join-Path $LogDir 'files_completed.csv')
-      'File|Skipped'     = (Join-Path $LogDir 'files_skipped.csv')
-      'File|Failed'      = (Join-Path $LogDir 'files_failed.csv')
-      'Folder|Completed' = (Join-Path $LogDir 'folders_completed.csv')
-      'Folder|Skipped'   = (Join-Path $LogDir 'folders_skipped.csv')
-      'Folder|Failed'    = (Join-Path $LogDir 'folders_failed.csv')
-    }
-    foreach ($p in $csvMap.Values) {
-      if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
-      'Path,Status,Error' | Out-File -LiteralPath $p -Encoding UTF8
-    }
-
-    # Procesamiento streaming, baja memoria
-    $writeLine = {
-      param($key,$path,$status,$err)
-      $csv = $csvMap[$key]; if (-not $csv) { return }
-      $safePath = ($path -replace '"','""')
-      $safeErr  = ($err  -replace '"','""')
-      Add-Content -LiteralPath $csv -Value ('"{0}","{1}","{2}"' -f $safePath,$status,$safeErr)
-    }
-
-    # Patrones tolerantes (AzCopy cambia formatos entre versiones)
-    $reStatus = @(
-      'status="?([A-Za-z]+)"?',                  # status="Success"
-      'transferStatus="?([A-Za-z]+)"?',          # transferStatus=Failed
-      '"Status"\s*:\s*"([A-Za-z]+)"'             # "Status":"Skipped"
-    )
-    $reIsDir = @(
-      'isDir=(true|false)',                      # isDir=true
-      'isFolder=(true|false)',                   # isFolder=false
-      '"isDir"\s*:\s*(true|false)',
-      '"entityType"\s*:\s*"(File|Folder)"'
-    )
-    $rePath = @(
-      'source="([^"]+)"',                        # source="C:\..."
-      'path="([^"]+)"',
-      '"path"\s*:\s*"([^"]+)"',
-      '"source"\s*:\s*"([^"]+)"',
-      '"relativePath"\s*:\s*"([^"]+)"'
-    )
-    $reError = @(
-      'error(Msg|Message)?="?([^"]+)"?',         # error="The system cannot find..."
-      '"error(Msg|Message)"\s*:\s*"([^"]+)"'
-    )
-
-    $chunkSize = 2000
-    $buf = New-Object System.Text.StringBuilder
-
-    Get-Content -LiteralPath $latestNative.FullName -ReadCount $chunkSize -ErrorAction SilentlyContinue | ForEach-Object {
-      foreach ($line in $_) {
-        # Extrae status
-        $status = $null
-        foreach ($rx in $reStatus) { if ($line -match $rx) { $status = $matches[1]; break } }
-        if (-not $status) { continue }
-
-        # Normaliza status
-        switch -Regex ($status) {
-          '^(Success|Completed)$' { $status = 'Completed' }
-          '^Skipped$'             { }
-          '^Failed$'              { }
-          default                 { continue } # ignorar otros niveles
-        }
-
-        # Path
-        $path = $null
-        foreach ($rx in $rePath) { if ($line -match $rx) { $path = $matches[1]; break } }
-        if (-not $path) { continue }
-
-        # isDir / entityType
-        $entity = 'File'
-        foreach ($rx in $reIsDir) {
-          if ($line -match $rx) {
-            $val = $matches[1]
-            if ($val -match '^(true|Folder)$') { $entity = 'Folder' } else { $entity = 'File' }
-            break
-          }
-        }
-
-        # Error (si existe)
-        $err = ''
-        foreach ($rx in $reError) { if ($line -match $rx) { $err = $matches[-1]; break } }
-
-        # Ruta CSV destino
-        $key = '{0}|{1}' -f $entity,$status
-        & $writeLine $key $path $status $err
-      }
-    }
-
-    Write-Log "CSV detallados generados (si el nivel de log lo permitió)."
-  }
-}
 
 # ---------- TXT opcionales (compat) ----------
 if ($GenerateStatusReports) {
