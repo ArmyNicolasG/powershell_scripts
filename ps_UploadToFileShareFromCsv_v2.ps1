@@ -51,7 +51,7 @@
   Nivel de salida en consola (AzCopy): essential (default), quiet, info.
 
 .PARAMETER GenerateStatusReports
-  Si se indica, genera failed.txt, skipped.txt, completed.txt y summary.txt en -LogDir.
+  Si se indica, genera CSVs separados por tipo/estado leyendo SOLO los logs nativos.
 #>
 
 [CmdletBinding()]
@@ -159,21 +159,21 @@ $outLines = @()
 & $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object { Write-Log $_ 'AZCOPY' } | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN' }
 
-# ---------- Resumen legible ----------
+# ---------- Resumen legible (totales combinados) ----------
 $summary = @{
   JobID=$null; Status=$null; TotalTransfers=$null; Completed=$null; Failed=$null; Skipped=$null;
   BytesTransferred=$null; Elapsed=$null
 }
 foreach ($ln in $outLines) {
   if ($ln -match 'Job\s+([0-9a-fA-F-]{8,})\s+has started') { $summary.JobID = $Matches[1] }
-  if ($ln -match '^Final Job Status:\s*(.+)$')             { $summary.Status = $Matches[1].Trim() }
-  if ($ln -match '^Total Number of Transfers:\s*(\d+)')    { $summary.TotalTransfers = [int]$Matches[1] }
-  if ($ln -match '^Number of File Transfers:\s*(\d+)')     { $summary.TotalTransfers = [int]$Matches[1] }
-  if ($ln -match '^Number of Transfers Completed:\s*(\d+)'){ $summary.Completed = [int]$Matches[1] }
-  if ($ln -match '^Number of Transfers Failed:\s*(\d+)')   { $summary.Failed = [int]$Matches[1] }
-  if ($ln -match '^Number of Transfers Skipped:\s*(\d+)')  { $summary.Skipped = [int]$Matches[1] }
-  if ($ln -match '^Total Bytes Transferred:\s*(\d+)')      { $summary.BytesTransferred = [int64]$Matches[1] }
-  if ($ln -match '^Elapsed Time:\s*(.+)$')                 { $summary.Elapsed = $Matches[1].Trim() }
+  if ($ln -match '^\s*Final Job Status:\s*(.+)$')          { $summary.Status = $Matches[1].Trim() }
+  if ($ln -match '^\s*Total Number of Transfers:\s*(\d+)') { $summary.TotalTransfers = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of File Transfers:\s*(\d+)')  { $summary.TotalTransfers = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Transfers Completed:\s*(\d+)') { $summary.Completed = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Transfers Failed:\s*(\d+)')    { $summary.Failed = [int]$Matches[1] }
+  if ($ln -match '^\s*Number of Transfers Skipped:\s*(\d+)')   { $summary.Skipped = [int]$Matches[1] }
+  if ($ln -match '^\s*Total Bytes Transferred:\s*(\d+)')       { $summary.BytesTransferred = [int64]$Matches[1] }
+  if ($ln -match '^\s*Elapsed Time:\s*(.+)$')                  { $summary.Elapsed = $Matches[1].Trim() }
 }
 
 Write-Log "===================== RESUMEN DE AZCOPY ====================="
@@ -187,99 +187,119 @@ if ($summary.BytesTransferred) { Write-Log ("Bytes transferidos:  {0}" -f $summa
 if ($summary.Elapsed)          { Write-Log ("Duración:            {0}" -f $summary.Elapsed) }
 Write-Log "============================================================="
 
-# ---------- NUEVO: failed-transfers.csv ----------
-if ($summary.JobID) {
-  try {
-    $failedCsv = Join-Path $LogDir 'failed-transfers.csv'
-    $json = & $az jobs show $summary.JobID --with-status=Failed --output-type json 2>$null
-    $rows = foreach ($ln in $json) {
-      if ([string]::IsNullOrWhiteSpace($ln)) { continue }
-      try {
-        $o = $ln | ConvertFrom-Json -ErrorAction Stop
-        [pscustomobject]@{
-          Path   = $o.path ?? $o.Path ?? $o.Destination ?? $o.Source ?? $null
-          Status = $o.status ?? $o.Status ?? $o.TransferStatus ?? $null
-          Error  = $o.errorMsg ?? $o.ErrorMsg ?? $o.Error ?? $null
+# ---------- Reportes por tipo/estado desde logs nativos (sin jobs/list) ----------
+if ($GenerateStatusReports) {
+  # Aviso: para obtener eventos Completed/Skipped por elemento, usa -NativeLogLevel INFO
+  if ($NativeLogLevel -ne 'INFO') {
+    Write-Log "Advertencia: NativeLogLevel=$NativeLogLevel. Para CSV detallados por elemento, usa -NativeLogLevel INFO." 'WARN'
+  }
+
+  # Encuentra el log nativo más reciente tras esta ejecución
+  $latestNative = Get-ChildItem -LiteralPath $AzNative -File -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $latestNative) {
+    Write-Log "No se encontró log nativo en '$AzNative'." 'WARN'
+  }
+  else {
+    Write-Log "Analizando log nativo: $($latestNative.FullName)"
+
+    $csvMap = @{
+      'File|Completed'   = (Join-Path $LogDir 'files_completed.csv')
+      'File|Skipped'     = (Join-Path $LogDir 'files_skipped.csv')
+      'File|Failed'      = (Join-Path $LogDir 'files_failed.csv')
+      'Folder|Completed' = (Join-Path $LogDir 'folders_completed.csv')
+      'Folder|Skipped'   = (Join-Path $LogDir 'folders_skipped.csv')
+      'Folder|Failed'    = (Join-Path $LogDir 'folders_failed.csv')
+    }
+    foreach ($p in $csvMap.Values) {
+      if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+      'Path,Status,Error' | Out-File -LiteralPath $p -Encoding UTF8
+    }
+
+    # Procesamiento streaming, baja memoria
+    $writeLine = {
+      param($key,$path,$status,$err)
+      $csv = $csvMap[$key]; if (-not $csv) { return }
+      $safePath = ($path -replace '"','""')
+      $safeErr  = ($err  -replace '"','""')
+      Add-Content -LiteralPath $csv -Value ('"{0}","{1}","{2}"' -f $safePath,$status,$safeErr)
+    }
+
+    # Patrones tolerantes (AzCopy cambia formatos entre versiones)
+    $reStatus = @(
+      'status="?([A-Za-z]+)"?',                  # status="Success"
+      'transferStatus="?([A-Za-z]+)"?',          # transferStatus=Failed
+      '"Status"\s*:\s*"([A-Za-z]+)"'             # "Status":"Skipped"
+    )
+    $reIsDir = @(
+      'isDir=(true|false)',                      # isDir=true
+      'isFolder=(true|false)',                   # isFolder=false
+      '"isDir"\s*:\s*(true|false)',
+      '"entityType"\s*:\s*"(File|Folder)"'
+    )
+    $rePath = @(
+      'source="([^"]+)"',                        # source="C:\..."
+      'path="([^"]+)"',
+      '"path"\s*:\s*"([^"]+)"',
+      '"source"\s*:\s*"([^"]+)"',
+      '"relativePath"\s*:\s*"([^"]+)"'
+    )
+    $reError = @(
+      'error(Msg|Message)?="?([^"]+)"?',         # error="The system cannot find..."
+      '"error(Msg|Message)"\s*:\s*"([^"]+)"'
+    )
+
+    $chunkSize = 2000
+    $buf = New-Object System.Text.StringBuilder
+
+    Get-Content -LiteralPath $latestNative.FullName -ReadCount $chunkSize -ErrorAction SilentlyContinue | ForEach-Object {
+      foreach ($line in $_) {
+        # Extrae status
+        $status = $null
+        foreach ($rx in $reStatus) { if ($line -match $rx) { $status = $matches[1]; break } }
+        if (-not $status) { continue }
+
+        # Normaliza status
+        switch -Regex ($status) {
+          '^(Success|Completed)$' { $status = 'Completed' }
+          '^Skipped$'             { }
+          '^Failed$'              { }
+          default                 { continue } # ignorar otros niveles
         }
-      } catch { }
+
+        # Path
+        $path = $null
+        foreach ($rx in $rePath) { if ($line -match $rx) { $path = $matches[1]; break } }
+        if (-not $path) { continue }
+
+        # isDir / entityType
+        $entity = 'File'
+        foreach ($rx in $reIsDir) {
+          if ($line -match $rx) {
+            $val = $matches[1]
+            if ($val -match '^(true|Folder)$') { $entity = 'Folder' } else { $entity = 'File' }
+            break
+          }
+        }
+
+        # Error (si existe)
+        $err = ''
+        foreach ($rx in $reError) { if ($line -match $rx) { $err = $matches[-1]; break } }
+
+        # Ruta CSV destino
+        $key = '{0}|{1}' -f $entity,$status
+        & $writeLine $key $path $status $err
+      }
     }
-    if ($rows) {
-      $rows | Export-Csv -LiteralPath $failedCsv -NoTypeInformation -Encoding UTF8
-      Write-Log "failed-transfers.csv -> $failedCsv"
-    } else {
-      # crea archivo vacío para que el orquestador pueda contar 0 de forma determinista
-      "" | Out-File -LiteralPath $failedCsv -Encoding UTF8
-      Write-Log "failed-transfers.csv -> $failedCsv (sin filas)"
-    }
-  } catch {
-    Write-Log "No se pudo generar failed-transfers.csv: $($_.Exception.Message)" 'WARN'
+
+    Write-Log "CSV detallados generados (si el nivel de log lo permitió)."
   }
 }
 
-# ---------- NUEVO: dest-inventory.csv (inventario del destino) ----------
-try {
-  $destInv = Join-Path $LogDir 'dest-inventory.csv'
-  $listOut = & $az list $destUrl --recursive --output-type json 2>$null
-  $rows = foreach ($ln in $listOut) {
-    if ([string]::IsNullOrWhiteSpace($ln)) { continue }
-    try {
-      $o = $ln | ConvertFrom-Json -ErrorAction Stop
-      [pscustomobject]@{
-        Path         = $o.path ?? $o.name ?? $o.Path ?? $o.Name
-        EntityType   = $o.entityType ?? $o.EntityType
-        Bytes        = $o.contentLength ?? $o.ContentLength
-        LastModified = $o.lastModified ?? $o.LastModified
-      }
-    } catch { }
-  }
-  if ($rows) {
-    $rows | Export-Csv -LiteralPath $destInv -NoTypeInformation -Encoding UTF8
-    Write-Log "dest-inventory.csv -> $destInv"
-  } else {
-    "" | Out-File -LiteralPath $destInv -Encoding UTF8
-    Write-Log "dest-inventory.csv -> $destInv (sin filas)"
-  }
-} catch {
-  Write-Log "No se pudo generar dest-inventory.csv: $($_.Exception.Message)" 'WARN'
-}
-
-# ---------- Reportes TXT (si se solicitó) ----------
-if ($GenerateStatusReports -and $summary.JobID) {
-  Write-Log "Generando reportes de estado (failed/skipped/completed) …"
-  $jobId = $summary.JobID
-  $json = & $az jobs show $jobId --with-status=All --output-type json 2>$null
-  $failed = New-Object System.Collections.Generic.List[object]
-  $skipped= New-Object System.Collections.Generic.List[object]
-  $done   = New-Object System.Collections.Generic.List[object]
-
-  foreach ($ln in $json) {
-    try {
-      if ([string]::IsNullOrWhiteSpace($ln)) { continue }
-      $o = $ln | ConvertFrom-Json -ErrorAction Stop
-      $path = $o.path ?? $o.Path ?? $o.Destination ?? $o.Source ?? $null
-      $status = $o.status ?? $o.Status ?? $o.TransferStatus ?? $null
-      $err = $o.errorMsg ?? $o.ErrorMsg ?? $o.Error ?? $null
-
-      switch ($status) {
-        'Success'      { $done.Add($path)    | Out-Null }
-        'Completed'    { $done.Add($path)    | Out-Null }
-        'Skipped'      { $skipped.Add($path) | Out-Null }
-        'Failed'       { $failed.Add(@("$path | $err")) | Out-Null }
-      }
-    } catch {}
-  }
-
-  $failedPath  = Join-Path $LogDir 'failed.txt'
-  $skippedPath = Join-Path $LogDir 'skipped.txt'
-  $donePath    = Join-Path $LogDir 'completed.txt'
-  $sumPath     = Join-Path $LogDir 'summary.txt'
-
-  if ($failed.Count  -gt 0) { $failed  | Set-Content -LiteralPath $failedPath  -Encoding UTF8; Write-Log "failed.txt -> $failedPath" }
-  if ($skipped.Count -gt 0) { $skipped | Set-Content -LiteralPath $skippedPath -Encoding UTF8; Write-Log "skipped.txt -> $skippedPath" }
-  if ($done.Count    -gt 0) { $done    | Set-Content -LiteralPath $donePath    -Encoding UTF8; Write-Log "completed.txt -> $donePath" }
-
+# ---------- TXT opcionales (compat) ----------
+if ($GenerateStatusReports) {
+  $sumPath = Join-Path $LogDir 'summary.txt'
   $summaryLines = @(
-    "JobID:               $($summary.JobID)",
     "Estado:              $($summary.Status)",
     "Total transfers:     $($summary.TotalTransfers)",
     "Completados:         $($summary.Completed)",
