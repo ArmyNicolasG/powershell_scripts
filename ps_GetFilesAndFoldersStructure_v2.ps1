@@ -575,124 +575,108 @@ Write-Log "INFO -> $InfoTxt"
 if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
 
 
-# ===== CSV centralizado de inventarios (PS7 safe, sin duplicados) =====
+# ===== CSV centralizado de inventarios (append-only + cola de pendientes) =====
 try {
   $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
   $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))
 
-  # >>> respeta parámetro externo si te lo pasan
+  # Usa parámetro si viene, por defecto junto al LogDir
   if ([string]::IsNullOrWhiteSpace($InventorySummaryCsv)) {
     $sumCsv = Join-Path $invRoot 'resumen-conciliaciones.csv'
   } else {
     $sumCsv = Convert-ToSystemPath $InventorySummaryCsv
   }
 
-  # -- cálculo GB + texto (es-ES) --
+  # ==== Datos de la fila ====
   [int64]$bytes = $TotalBytes
   [double]$gb   = 0.0
   if ($bytes -gt 0) { $gb = [math]::Round(([double]$bytes / 1GB), 6) }
   $es = [System.Globalization.CultureInfo]::GetCultureInfo('es-ES')
   $gb_texto = $gb.ToString('0.######', $es)
+  $gb_invariant = $gb.ToString('0.######', [System.Globalization.CultureInfo]::InvariantCulture)
   $nowStr = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
 
-  $row = [pscustomobject]@{
-    'Subcarpeta'               = $subcarpeta
-    'Tamano_Bytes'             = $bytes
-    'Tamano_GB'                = $gb
-    'Tamano_GB_Texto'          = $gb_texto
-    'Carpetas_inaccesibles'    = $InaccessibleFolders
-    'Carpetas_accesibles'      = $AccessibleFolders
-    'Archivos_accesibles'      = $AccessibleFiles
-    'Archivos_inaccesibles'    = $InaccessibleFiles
-    'FechaHora'                = $nowStr
+  $cols = @('Subcarpeta','Tamano_Bytes','Tamano_GB','Tamano_GB_Texto','Carpetas_inaccesibles','Carpetas_accesibles','Archivos_accesibles','Archivos_inaccesibles','FechaHora')
+  $rowMap = @{
+    Subcarpeta             = $subcarpeta
+    Tamano_Bytes           = $bytes
+    Tamano_GB              = $gb_invariant      # numérico con punto
+    Tamano_GB_Texto        = $gb_texto          # texto con coma (Excel-ES)
+    Carpetas_inaccesibles  = $InaccessibleFolders
+    Carpetas_accesibles    = $AccessibleFolders
+    Archivos_accesibles    = $AccessibleFiles
+    Archivos_inaccesibles  = $InaccessibleFiles
+    FechaHora              = $nowStr
   }
 
-  function As-Array([object]$x) {
-    if ($null -eq $x) { return @() }
-    if ($x -is [System.Collections.IEnumerable] -and -not ($x -is [string])) { return @($x) }
-    return ,$x
+  function _CsvEsc([object]$v){
+    if ($null -eq $v) { return '""' }
+    $s = [string]$v
+    $s = $s -replace '"','""'
+    return '"' + $s + '"'
+  }
+  function Build-CsvLine([hashtable]$map,[string[]]$order){
+    ($order | ForEach-Object { _CsvEsc $map[$_] }) -join ';'
   }
 
-  # Mutex global (fallback local)
+  $queueDir = Join-Path $invRoot '.__queue'
+  Ensure-Directory -Dir $queueDir
+
+  # Cabecera (UTF8 BOM) si no existe
+  Ensure-CsvHeaderUtf8Bom -Path $sumCsv -HeaderLine ($cols -join ';')
+
+  # Mutex global para sincronizar procesos
   $mutex = $null
   try   { $mutex = [System.Threading.Mutex]::new($false,'Global\inventory_summary_mutex') }
   catch { $mutex = [System.Threading.Mutex]::new($false,'inventory_summary_mutex') }
   $null = $mutex.WaitOne()
 
-  function Export-Table([object[]]$data,[string]$path){
-    $retry=0; while($true){
-      try { $data | Export-Csv -LiteralPath $path -NoTypeInformation -Delimiter ';' -Encoding utf8BOM; break }
-      catch [System.UnauthorizedAccessException],[System.IO.IOException] {
-        if ($retry -ge 12) { throw }
-        Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
-      }
-    }
-  }
-
-  # Carga maestro
-  $master = @()
-  if (Test-Path -LiteralPath $sumCsv) {
-    $try = { Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8 }
-    try { $master = As-Array(& $try) }
-    catch {
-      $retry=0; while($true){
-        try { $master = As-Array(& $try); break }
-        catch {
-          if ($retry -ge 12) { throw }
-          Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
+  # 1) Drenar pendientes primero
+  try {
+    Get-ChildItem -LiteralPath $queueDir -Filter 'inv_*.line' -File -ErrorAction SilentlyContinue |
+      Sort-Object Name | ForEach-Object {
+        try {
+          $line = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop
+          Append-LinesUtf8Retry -Path $sumCsv -Lines @($line)
+          Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        } catch {
+          # si no se pudo anexar, dejamos de drenar (algo sigue bloqueando)
+          throw
         }
       }
-    }
+  } catch {
+    # seguimos igual; el drenaje volverá a intentarse en próximas ejecuciones
   }
 
-  # Migración de encabezados si faltan
-  $needGBText = ($master.Count -gt 0 -and -not ($master[0].PSObject.Properties.Name -contains 'Tamano_GB_Texto'))
-  $needFecha  = ($master.Count -gt 0 -and -not ($master[0].PSObject.Properties.Name -contains 'FechaHora'))
-  if ($needGBText -or $needFecha) {
-    foreach($r in $master){
-      if ($needGBText -and -not $r.PSObject.Properties.Match('Tamano_GB_Texto')) {
-        $val = if ($r.Tamano_GB) { ([double]$r.Tamano_GB).ToString('0.######',$es) } else { '' }
-        Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val -Force
-      }
-      if ($needFecha -and -not $r.PSObject.Properties.Match('FechaHora')) {
-        Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue '' -Force
-      }
-    }
+  # 2) Intentar anexar la fila actual (con reintentos internos)
+  $lineNow = Build-CsvLine -map $rowMap -order $cols
+  try {
+    Append-LinesUtf8Retry -Path $sumCsv -Lines @($lineNow)
+  } catch {
+    # 3) Fallback a cola: garantizamos persistencia
+    $safeName = ($subcarpeta -replace '[^A-Za-z0-9_\-\.]','_')
+    $qFile = Join-Path $queueDir ("inv_{0:yyyyMMddHHmmss}_{1}_{2}.line" -f (Get-Date), $safeName, ([guid]::NewGuid().ToString('N')))
+    # guardamos como UTF8 BOM para mantener consistencia
+    [System.IO.File]::WriteAllText((Add-LongPathPrefix (Convert-ToSystemPath $qFile)), $lineNow + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($true))
+    Write-Log "WARN: No se pudo anexar al maestro; encolado -> $qFile" 'WARN'
   }
+}
+catch {
+  Write-Log "WARN: Error en el bloque de resumen-conciliaciones (se reintentará en futuras ejecuciones): $($_.Exception.Message)" 'WARN'
+}
+finally {
+  if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
+}
 
-  # Sweeper de temporales
-  $tmpRows = @()
-  Get-ChildItem -LiteralPath $invRoot -Filter '.__tmp_inv_*.csv' -File -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-      $rows = As-Array( Import-Csv -LiteralPath $_.FullName -Delimiter ';' -Encoding UTF8 )
-      foreach($r in $rows){
-        if (-not $r.PSObject.Properties.Match('Tamano_GB_Texto')) {
-          $val = if ($r.Tamano_GB) { ([double]$r.Tamano_GB).ToString('0.######',$es) } else { '' }
-          Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val -Force
-        }
-        if (-not $r.PSObject.Properties.Match('FechaHora')) {
-          Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue '' -Force
-        }
-      }
-      $tmpRows += $rows
-      Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-    } catch { }
-  }
+# === (Opcional) snapshot deduplicado; no toca el maestro si falla ===
+try {
+  $snapshot = Join-Path $invRoot 'resumen-conciliaciones_dedup.csv'
+  $data = @()
+  try   { $data = Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8 }
+  catch { return }  # si el maestro está bloqueado, lo dejamos para la próxima
 
-  # UPsert por Subcarpeta
-  $all = @()
-  $all += $master
-  $all += $tmpRows
-
-  # >>> si filtras, vuelve a forzar array
-  if ($all.Count -gt 0) { $all = @($all | Where-Object { $_.Subcarpeta -ne $subcarpeta }) }
-
-  # >>> al agregar una fila única, usa suma de arrays
-  $all = @($all) + @($row)
-
-  # >>> la deduplicación también debe devolver SIEMPRE array
-  $all = @(
-    $all |
+  $dedup =
+    $data |
     Group-Object Subcarpeta |
     ForEach-Object {
       if ($_.Count -gt 1 -and ($_.Group | Where-Object { $_.FechaHora })) {
@@ -700,23 +684,31 @@ try {
       } else {
         $_.Group | Select-Object -Last 1
       }
+    } |
+    Select-Object $cols
+
+  $tmpSnap = Join-Path $invRoot (".__snap_{0}.csv" -f ([guid]::NewGuid()))
+  $dedup | Export-Csv -LiteralPath $tmpSnap -NoTypeInformation -Delimiter ';' -Encoding utf8BOM
+
+  $retries = 0
+  while ($true) {
+    try {
+      if (Test-Path -LiteralPath $snapshot) {
+        [System.IO.File]::Replace((Add-LongPathPrefix (Convert-ToSystemPath $tmpSnap)),
+                                  (Add-LongPathPrefix (Convert-ToSystemPath $snapshot)),
+                                  (Add-LongPathPrefix (Convert-ToSystemPath ($snapshot + '.bak'))), $false)
+      } else {
+        Move-Item -LiteralPath $tmpSnap -Destination $snapshot -Force
+      }
+      break
+    } catch {
+      if ($retries -ge 12) { Remove-Item -LiteralPath $tmpSnap -Force -ErrorAction SilentlyContinue; break }
+      Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retries)); $retries++
     }
-  )
-
-  # orden de columnas fijo
-  $cols = 'Subcarpeta','Tamano_Bytes','Tamano_GB','Tamano_GB_Texto','Carpetas_inaccesibles','Carpetas_accesibles','Archivos_accesibles','Archivos_inaccesibles','FechaHora'
-  $out = $all | Select-Object $cols
-
-  # Guardar maestro
-  $tmpOut = Join-Path $invRoot (".__rewrite_{0}.csv" -f ([guid]::NewGuid()))
-  Export-Table -data $out -path $tmpOut
-  Move-Item -LiteralPath $tmpOut -Destination $sumCsv -Force
+  }
 }
 catch {
-  Write-Log "WARN: No se pudo actualizar resumen-conciliaciones.csv -> $($_.Exception.Message)" 'WARN'
-}
-finally {
-  if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
+  # Silencioso: snapshot es best-effort
 }
 # ===== FIN CSV centralizado =====
 
