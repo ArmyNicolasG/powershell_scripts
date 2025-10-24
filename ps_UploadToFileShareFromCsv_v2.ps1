@@ -308,57 +308,116 @@ if ($GenerateStatusReports) {
   Write-Log "summary.txt -> $sumPath"
 }
 
-# ---------- CSV centralizado de subidas (robusto + Excel) ----------
+## ---------- CSV centralizado de subidas (append-only + cola + Excel) ----------
 try {
-  if ($UploadSummaryCsv) {
-    $folderName = Split-Path -Path $SourceRoot -Leaf
+  # === Resolución de ruta del CSV maestro ===
+  $sumCsv = $null
+  if ([string]::IsNullOrWhiteSpace($UploadSummaryCsv)) {
+    $sumCsv = Join-Path (Split-Path -Parent (Convert-ToSystemPath $LogDir)) 'resumen-subidas.csv'
+  } else {
+    $sumCsv = Convert-ToSystemPath $UploadSummaryCsv
+  }
 
-    # Encabezado amigable para Excel (sin 'ñ'), separador ';'
-    $header = 'Subcarpeta;JobID;Estado;TotalTransfers;Completados;Fallidos;Saltados;BytesTransferidos;Duracion;FechaHora;LogWrapper'
-
-    # Línea de datos, siempre entrecomillada por campo
-    $sep = ';'
-    $vals = @(
-      $folderName
-      $summary.JobID
-      $summary.Status
-      $summary.TotalTransfers
-      $summary.TransfersCompleted
-      $summary.TransfersFailed
-      $summary.TransfersSkipped
-      $summary.BytesTransferred
-      $summary.Elapsed
-      (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-      $script:LogPath
-    ) | ForEach-Object { "$_" -replace '"','""' }
-    $dataLine = '"' + ($vals -join ('"' + $sep + '"')) + '"'
-
-    # Mutex global para escrituras atómicas entre procesos/ventanas
-    $mutex = New-NamedMutex -Name 'upload_summary_mutex'
-    $null  = $mutex.WaitOne()
-
-    # Fase de reparación: fusiona huérfanos antiguos si existieran
-    $sumDir = Split-Path -Parent (Convert-ToSystemPath $UploadSummaryCsv)
-    $orphans = Get-ChildItem -LiteralPath $sumDir -File -Filter '.__tmp_up_*.csv' -ErrorAction SilentlyContinue
-    if ($orphans) {
-      Ensure-CsvHeaderUtf8Bom -Path $UploadSummaryCsv -HeaderLine $header
-      foreach ($t in $orphans) {
-        $lines = Get-Content -LiteralPath $t -ErrorAction SilentlyContinue
-        if ($lines.Count -gt 1) {
-          Append-LinesUtf8Retry -Path $UploadSummaryCsv -Lines $lines[1..($lines.Count-1)]
-        }
-        Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue
+  # === Helpers mínimos si no existen (compat) ===
+  if (-not (Get-Command New-NamedMutex -ErrorAction SilentlyContinue)) {
+    function New-NamedMutex { param([string]$Name) [System.Threading.Mutex]::new($false, "Global\$Name") }
+  }
+  if (-not (Get-Command Ensure-CsvHeaderUtf8Bom -ErrorAction SilentlyContinue)) {
+    function Ensure-CsvHeaderUtf8Bom {
+      param([Parameter(Mandatory)][string]$Path,
+            [Parameter(Mandatory)][string]$HeaderLine)
+      if (-not (Test-Path -LiteralPath $Path)) {
+        $lp = Add-LongPathPrefix (Convert-ToSystemPath $Path)
+        [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+        $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::CreateNew,
+                                     [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($true)) # BOM
+        $sw.WriteLine($HeaderLine); $sw.Dispose(); $fs.Dispose()
       }
     }
-
-    # Escritura normal
-    Ensure-CsvHeaderUtf8Bom -Path $UploadSummaryCsv -HeaderLine $header
-    Append-LinesUtf8Retry   -Path $UploadSummaryCsv -Lines @($dataLine)
-
-    Write-Log "UploadSummaryCsv actualizado -> $UploadSummaryCsv"
   }
-  else {
-    Write-Log "UploadSummaryCsv no especificado: se omite CSV centralizado (modo standalone)."
+  if (-not (Get-Command Append-LinesUtf8Retry -ErrorAction SilentlyContinue)) {
+    function Append-LinesUtf8Retry {
+      param([Parameter(Mandatory)][string]$Path,
+            [Parameter(Mandatory)][string[]]$Lines,
+            [int]$MaxRetries = 40, [int]$InitialDelayMs = 120)
+      $lp = Add-LongPathPrefix (Convert-ToSystemPath $Path)
+      [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+      $attempt = 0
+      while ($true) {
+        try {
+          $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append,
+                                       [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+          $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($false))
+          foreach ($l in $Lines) { $sw.WriteLine($l) }
+          $sw.Dispose(); $fs.Dispose()
+          break
+        } catch [System.IO.IOException],[System.UnauthorizedAccessException] {
+          if ($attempt -ge $MaxRetries) { throw }
+          Start-Sleep -Milliseconds ([int]($InitialDelayMs * [math]::Pow(1.25, $attempt)))
+          $attempt++
+        }
+      }
+    }
+  }
+
+  # === Encabezado y línea de datos ===
+  $header  = 'Subcarpeta;JobID;Estado;TotalTransfers;Completados;Fallidos;Saltados;BytesTransferidos;Duracion;FechaHora;LogWrapper'
+  $sep     = ';'
+  $folderName = Split-Path -Path $SourceRoot -Leaf
+
+  # Valores -> CSV escapado (siempre con comillas)
+  function _CsvEsc([object]$v){ if ($null -eq $v) { return '""' }; '"' + ([string]$v -replace '"','""') + '"' }
+  $vals = @(
+    $folderName
+    $summary.JobID
+    $summary.Status
+    $summary.TotalTransfers
+    $summary.TransfersCompleted
+    $summary.TransfersFailed
+    $summary.TransfersSkipped
+    $summary.BytesTransferred
+    $summary.Elapsed
+    (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $script:LogPath
+  ) | ForEach-Object { _CsvEsc $_ }
+  $dataLine = ($vals -join $sep)
+
+  # === Mutex + cola de pendientes ===
+  $mutex = New-NamedMutex -Name 'upload_summary_mutex'
+  $null  = $mutex.WaitOne()
+
+  $sumDir   = Split-Path -Parent (Convert-ToSystemPath $sumCsv)
+  $queueDir = Join-Path $sumDir '.__queue'
+  if (-not (Test-Path -LiteralPath $queueDir)) { [void](New-Item -ItemType Directory -Path $queueDir -Force) }
+
+  # Cabecera garantizada
+  Ensure-CsvHeaderUtf8Bom -Path $sumCsv -HeaderLine $header
+
+  # 1) Drenar pendientes primero (upl_*.line)
+  try {
+    Get-ChildItem -LiteralPath $queueDir -Filter 'upl_*.line' -File -ErrorAction SilentlyContinue |
+      Sort-Object Name | ForEach-Object {
+        try {
+          $line = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop
+          Append-LinesUtf8Retry -Path $sumCsv -Lines @($line)
+          Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        } catch { throw }
+      }
+  } catch {
+    # si no se pudo drenar todo, se intentará en la próxima ejecución
+  }
+
+  # 2) Anexar la fila actual (o encolar si no se puede)
+  try {
+    Append-LinesUtf8Retry -Path $sumCsv -Lines @($dataLine)
+    Write-Log "UploadSummaryCsv actualizado -> $sumCsv"
+  } catch {
+    $safe = ($folderName -replace '[^A-Za-z0-9_\-\.]','_')
+    $qFile = Join-Path $queueDir ("upl_{0:yyyyMMddHHmmss}_{1}_{2}.line" -f (Get-Date), $safe, ([guid]::NewGuid().ToString('N')))
+    # Guardar como UTF8 con BOM para mantener consistencia
+    [System.IO.File]::WriteAllText((Add-LongPathPrefix (Convert-ToSystemPath $qFile)), $dataLine + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($true))
+    Write-Log "WARN: No se pudo anexar al maestro; encolado -> $qFile" 'WARN'
   }
 }
 catch {
@@ -367,6 +426,30 @@ catch {
 finally {
   if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
 }
+
+# --- (Opcional) Snapshot deduplicado para análisis (no toca al maestro si falla) ---
+try {
+  $snapshot = Join-Path (Split-Path -Parent (Convert-ToSystemPath $sumCsv)) 'resumen-subidas_dedup.csv'
+  $data = @()
+  try { $data = Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8 } catch { $data = @() }
+  if ($data.Count -gt 0) {
+    $dedup =
+      $data |
+      Group-Object Subcarpeta |
+      ForEach-Object {
+        if ($_.Count -gt 1 -and ($_.Group | Where-Object { $_.FechaHora })) {
+          $_.Group | Sort-Object { try { [datetime]$_.FechaHora } catch { Get-Date '1900-01-01' } } -Descending | Select-Object -First 1
+        } else {
+          $_.Group | Select-Object -Last 1
+        }
+      } |
+      Select-Object 'Subcarpeta','JobID','Estado','TotalTransfers','Completados','Fallidos','Saltados','BytesTransferidos','Duracion','FechaHora','LogWrapper'
+
+    $tmpSnap = Join-Path (Split-Path -Parent (Convert-ToSystemPath $sumCsv)) (".__snap_upl_{0}.csv" -f ([guid]::NewGuid()))
+    $dedup | Export-Csv -LiteralPath $tmpSnap -NoTypeInformation -Delimiter ';' -Encoding utf8BOM
+    try { Move-Item -LiteralPath $tmpSnap -Destination $snapshot -Force } catch { Remove-Item -LiteralPath $tmpSnap -Force -ErrorAction SilentlyContinue }
+  }
+} catch { }
 
 
 
