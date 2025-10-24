@@ -579,7 +579,13 @@ if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
 try {
   $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
   $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))
-  $sumCsv      = Join-Path $invRoot 'resumen-conciliaciones.csv'
+
+  # >>> respeta parámetro externo si te lo pasan
+  if ([string]::IsNullOrWhiteSpace($InventorySummaryCsv)) {
+    $sumCsv = Join-Path $invRoot 'resumen-conciliaciones.csv'
+  } else {
+    $sumCsv = Convert-ToSystemPath $InventorySummaryCsv
+  }
 
   # -- cálculo GB + texto (es-ES) --
   [int64]$bytes = $TotalBytes
@@ -601,7 +607,6 @@ try {
     'FechaHora'                = $nowStr
   }
 
-  # helper: fuerza array
   function As-Array([object]$x) {
     if ($null -eq $x) { return @() }
     if ($x -is [System.Collections.IEnumerable] -and -not ($x -is [string])) { return @($x) }
@@ -614,7 +619,6 @@ try {
   catch { $mutex = [System.Threading.Mutex]::new($false,'inventory_summary_mutex') }
   $null = $mutex.WaitOne()
 
-  # util: export con reintentos
   function Export-Table([object[]]$data,[string]$path){
     $retry=0; while($true){
       try { $data | Export-Csv -LiteralPath $path -NoTypeInformation -Delimiter ';' -Encoding utf8BOM; break }
@@ -625,7 +629,7 @@ try {
     }
   }
 
-  # Carga maestro (si existe), siempre como array
+  # Carga maestro
   $master = @()
   if (Test-Path -LiteralPath $sumCsv) {
     $try = { Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8 }
@@ -680,12 +684,14 @@ try {
   $all += $master
   $all += $tmpRows
 
-  # elimina previas de esta subcarpeta y agrega la nueva fila
-  if ($all.Count -gt 0) { $all = $all | Where-Object { $_.Subcarpeta -ne $subcarpeta } }
-  $all += $row
+  # >>> si filtras, vuelve a forzar array
+  if ($all.Count -gt 0) { $all = @($all | Where-Object { $_.Subcarpeta -ne $subcarpeta }) }
 
-  # si aún hay duplicados, deja la más reciente por FechaHora
-  $all =
+  # >>> al agregar una fila única, usa suma de arrays
+  $all = @($all) + @($row)
+
+  # >>> la deduplicación también debe devolver SIEMPRE array
+  $all = @(
     $all |
     Group-Object Subcarpeta |
     ForEach-Object {
@@ -695,6 +701,7 @@ try {
         $_.Group | Select-Object -Last 1
       }
     }
+  )
 
   # orden de columnas fijo
   $cols = 'Subcarpeta','Tamano_Bytes','Tamano_GB','Tamano_GB_Texto','Carpetas_inaccesibles','Carpetas_accesibles','Archivos_accesibles','Archivos_inaccesibles','FechaHora'
