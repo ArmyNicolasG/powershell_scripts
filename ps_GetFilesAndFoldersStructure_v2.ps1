@@ -575,7 +575,7 @@ Write-Log "INFO -> $InfoTxt"
 if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
 
 
-# ===== CSV centralizado de inventarios (compatible Excel, robusto, sin duplicados) =====
+# ===== CSV centralizado de inventarios (PS7 safe, sin duplicados) =====
 try {
   $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
   $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))
@@ -587,7 +587,6 @@ try {
   if ($bytes -gt 0) { $gb = [math]::Round(([double]$bytes / 1GB), 6) }
   $es = [System.Globalization.CultureInfo]::GetCultureInfo('es-ES')
   $gb_texto = $gb.ToString('0.######', $es)
-
   $nowStr = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
 
   $row = [pscustomobject]@{
@@ -602,31 +601,38 @@ try {
     'FechaHora'                = $nowStr
   }
 
+  # helper: fuerza array
+  function As-Array([object]$x) {
+    if ($null -eq $x) { return @() }
+    if ($x -is [System.Collections.IEnumerable] -and -not ($x -is [string])) { return @($x) }
+    return ,$x
+  }
+
   # Mutex global (fallback local)
   $mutex = $null
   try   { $mutex = [System.Threading.Mutex]::new($false,'Global\inventory_summary_mutex') }
   catch { $mutex = [System.Threading.Mutex]::new($false,'inventory_summary_mutex') }
   $null = $mutex.WaitOne()
 
-  # ---------- util: Exporta tabla a csv (con ; y BOM) ----------
-  function Export-Table([array]$data,[string]$path){
+  # util: export con reintentos
+  function Export-Table([object[]]$data,[string]$path){
     $retry=0; while($true){
       try { $data | Export-Csv -LiteralPath $path -NoTypeInformation -Delimiter ';' -Encoding utf8BOM; break }
       catch [System.UnauthorizedAccessException],[System.IO.IOException] {
-        if ($retry -ge 12) { throw }; Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
+        if ($retry -ge 12) { throw }
+        Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
       }
     }
   }
 
-  # ---------- Carga segura del maestro (si existe) ----------
+  # Carga maestro (si existe), siempre como array
   $master = @()
   if (Test-Path -LiteralPath $sumCsv) {
-    try {
-      $master = Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8
-    } catch {
-      # si falla lectura por lock, reintenta breve
+    $try = { Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8 }
+    try { $master = As-Array(& $try) }
+    catch {
       $retry=0; while($true){
-        try { $master = Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8; break }
+        try { $master = As-Array(& $try); break }
         catch {
           if ($retry -ge 12) { throw }
           Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
@@ -635,53 +641,50 @@ try {
     }
   }
 
-  # ---------- Migración de encabezados si faltan ----------
+  # Migración de encabezados si faltan
   $needGBText = ($master.Count -gt 0 -and -not ($master[0].PSObject.Properties.Name -contains 'Tamano_GB_Texto'))
   $needFecha  = ($master.Count -gt 0 -and -not ($master[0].PSObject.Properties.Name -contains 'FechaHora'))
   if ($needGBText -or $needFecha) {
     foreach($r in $master){
       if ($needGBText -and -not $r.PSObject.Properties.Match('Tamano_GB_Texto')) {
         $val = if ($r.Tamano_GB) { ([double]$r.Tamano_GB).ToString('0.######',$es) } else { '' }
-        Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val
+        Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val -Force
       }
       if ($needFecha -and -not $r.PSObject.Properties.Match('FechaHora')) {
-        Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue ''
+        Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue '' -Force
       }
     }
   }
 
-  # ---------- Sweeper de órfanos + consolidación ----------
+  # Sweeper de temporales
   $tmpRows = @()
   Get-ChildItem -LiteralPath $invRoot -Filter '.__tmp_inv_*.csv' -File -ErrorAction SilentlyContinue | ForEach-Object {
     try {
-      $rows = Import-Csv -LiteralPath $_.FullName -Delimiter ';' -Encoding UTF8
-      if ($rows) {
-        # Asegura columnas nuevas si vienen de versiones previas
-        foreach($r in $rows){
-          if (-not $r.PSObject.Properties.Match('Tamano_GB_Texto')) {
-            $val = if ($r.Tamano_GB) { ([double]$r.Tamano_GB).ToString('0.######',$es) } else { '' }
-            Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val
-          }
-          if (-not $r.PSObject.Properties.Match('FechaHora')) {
-            Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue ''
-          }
+      $rows = As-Array( Import-Csv -LiteralPath $_.FullName -Delimiter ';' -Encoding UTF8 )
+      foreach($r in $rows){
+        if (-not $r.PSObject.Properties.Match('Tamano_GB_Texto')) {
+          $val = if ($r.Tamano_GB) { ([double]$r.Tamano_GB).ToString('0.######',$es) } else { '' }
+          Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val -Force
         }
-        $tmpRows += $rows
+        if (-not $r.PSObject.Properties.Match('FechaHora')) {
+          Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue '' -Force
+        }
       }
+      $tmpRows += $rows
       Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-    } catch {
-      # Si algo falla, deja el tmp para un próximo intento
-    }
+    } catch { }
   }
 
-  # ---------- UPsert: 1 fila por Subcarpeta (preferimos la más reciente) ----------
-  $all = @($master + $tmpRows)
+  # UPsert por Subcarpeta
+  $all = @()
+  $all += $master
+  $all += $tmpRows
 
-  # Reemplaza/crea la fila de la subcarpeta actual
-  $all = $all | Where-Object { $_.Subcarpeta -ne $subcarpeta }
+  # elimina previas de esta subcarpeta y agrega la nueva fila
+  if ($all.Count -gt 0) { $all = $all | Where-Object { $_.Subcarpeta -ne $subcarpeta } }
   $all += $row
 
-  # Si aún quedaran duplicados por sweep (mismo nombre), nos quedamos con la más reciente por FechaHora
+  # si aún hay duplicados, deja la más reciente por FechaHora
   $all =
     $all |
     Group-Object Subcarpeta |
@@ -693,9 +696,13 @@ try {
       }
     }
 
-  # ---------- Guardar maestro ----------
+  # orden de columnas fijo
+  $cols = 'Subcarpeta','Tamano_Bytes','Tamano_GB','Tamano_GB_Texto','Carpetas_inaccesibles','Carpetas_accesibles','Archivos_accesibles','Archivos_inaccesibles','FechaHora'
+  $out = $all | Select-Object $cols
+
+  # Guardar maestro
   $tmpOut = Join-Path $invRoot (".__rewrite_{0}.csv" -f ([guid]::NewGuid()))
-  Export-Table -data $all -path $tmpOut
+  Export-Table -data $out -path $tmpOut
   Move-Item -LiteralPath $tmpOut -Destination $sumCsv -Force
 }
 catch {
@@ -705,3 +712,4 @@ finally {
   if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
 }
 # ===== FIN CSV centralizado =====
+
