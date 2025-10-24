@@ -75,7 +75,7 @@ param(
 
   [switch]$GenerateStatusReports,
   [ValidateSet('ERROR','INFO','WARNING','PANIC')][string]$NativeLogLevel = 'ERROR',
-  [ValidateSet('essential','quiet','info')][string]$ConsoleOutputLevel = 'essential'
+  [ValidateSet('essential','quiet','info')][string]$ConsoleOutputLevel = 'essential',
   [string]$UploadSummaryCsv
 
 )

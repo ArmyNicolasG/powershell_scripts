@@ -83,7 +83,7 @@ param(
   [switch]$IncludeLooseFilesAsFolder = $true,
   [switch]$ComputeRootSize,
   [switch]$DoInventory,   # default: false
-  [switch]$DoUpload      # default: false
+  [switch]$DoUpload,      # default: false
 
   [string]$InventorySummaryCsv,
 [string]$UploadSummaryCsv,

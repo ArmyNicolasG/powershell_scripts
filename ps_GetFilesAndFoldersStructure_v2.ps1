@@ -36,7 +36,7 @@ param(
   [switch]$ComputeRootSize,
   [switch]$SanitizeNames,
   [int]$MaxNameLength = 255,
-  [string]$ReplacementChar = "_"
+  [string]$ReplacementChar = "_",
   [string]$InventorySummaryCsv
 
 )
