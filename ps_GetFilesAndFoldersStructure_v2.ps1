@@ -575,63 +575,70 @@ Write-Log "INFO -> $InfoTxt"
 if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
 
 
-# ===== CSV centralizado de inventarios (robusto + Excel) =====
-if (-not $InventorySummaryCsv) { Write-Log "InventorySummaryCsv no especificado: se omite CSV centralizado."; return }
+# ===== CSV centralizado de inventarios (compatible Excel) =====
 try {
+  # Carpeta de la subcarpeta (nombre visible) y raíz del log de inventario
   $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
   $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))
   $sumCsv      = Join-Path $invRoot 'resumen-conciliaciones.csv'
 
-  # Si TotalBytes no viene (por no usar -ComputeRootSize), intenta folder-info.txt
+  # Cálculo preciso en GB
   [int64]$bytes = $TotalBytes
-  if ($bytes -le 0) {
-    $fi = Join-Path $LogDir 'folder-info.txt'
-    if (Test-Path -LiteralPath $fi) {
-      foreach($line in (Get-Content -LiteralPath $fi -ErrorAction SilentlyContinue)) {
-        if ($line -match '^\s*TotalBytes:\s*(\d+)\s*$') { $bytes = [int64]$matches[1]; break }
-      }
-    }
+  [double]$gb = 0.0
+  if ($bytes -gt 0) { $gb = [math]::Round(([double]$bytes / 1GB), 6) }
+
+  # Texto con cultura es-ES (coma decimal) para que Excel no lo “desboquee”
+  $es = [System.Globalization.CultureInfo]::GetCultureInfo('es-ES')
+  $gb_texto = $gb.ToString('0.######', $es)  # con cultura es-ES usa coma decimal automáticamente
+
+  # Fila a escribir (¡sin ñ en encabezados!)
+  $row = [pscustomobject]@{
+    'Subcarpeta'               = $subcarpeta
+    'Tamano_Bytes'             = $bytes
+    'Tamano_GB'                = $gb            # numérico real
+    'Tamano_GB_Texto'          = $gb_texto      # amigable para Excel ES
+    'Carpetas_inaccesibles'    = $InaccessibleFolders
+    'Carpetas_accesibles'      = $AccessibleFolders
+    'Archivos_accesibles'      = $AccessibleFiles
+    'Archivos_inaccesibles'    = $InaccessibleFiles
   }
-  [double]$gb = ($bytes -gt 0) ? [math]::Round(([double]$bytes / 1GB), 6) : 0.0
 
-  # Encabezado amigable para Excel (sin "ñ") usando ; como separador
-  $header = 'Subcarpeta;Tamano_Bytes;Tamano_GB;Carpetas_inaccesibles;Carpetas_accesibles;Archivos_accesibles;Archivos_inaccesibles'
-
-  # Valor CSV entrecomillado y separado por ';'
-  $sep = ';'
-  $vals = @(
-    $subcarpeta,
-    "$bytes",
-    "$gb",
-    "$InaccessibleFolders",
-    "$AccessibleFolders",
-    "$AccessibleFiles",
-    "$InaccessibleFiles"
-  ) | ForEach-Object { $_ -replace '"','""' }
-  $dataLine = '"' + ($vals -join ('"' + $sep + '"')) + '"'
-
-  $mutex = New-NamedMutex -Name 'inventory_summary_mutex'
+  # Mutex global para escrituras concurrentes seguras
+  $mutex = [System.Threading.Mutex]::new($false, 'Global\inventory_summary_mutex')
   $null  = $mutex.WaitOne()
 
-  $orphans = Get-ChildItem -LiteralPath $invRoot -File -Filter '.__tmp_inv_*.csv' -ErrorAction SilentlyContinue
-  if ($orphans) {
-    Ensure-CsvHeaderUtf8Bom -Path $sumCsv -HeaderLine $header
-    foreach ($t in $orphans) {
-      $lines = Get-Content -LiteralPath $t -ErrorAction SilentlyContinue
-      if ($lines.Count -gt 1) {
-        Append-LinesUtf8Retry -Path $sumCsv -Lines $lines[1..($lines.Count-1)]
-        Write-Log "resumen-conciliaciones.csv actualizado para '$subcarpeta' (Bytes=$bytes, GB=$gb)"
+  $mustHeader = -not (Test-Path -LiteralPath $sumCsv)
 
-      }
-      Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue
+  # --- Migración: si existe pero SIN la nueva columna, añadimos la columna al encabezado
+  if (-not $mustHeader) {
+    $hdr = (Get-Content -LiteralPath $sumCsv -TotalCount 1)
+    if ($hdr -and ($hdr -notmatch '(?:^|;)Tamano_GB_Texto(?:;|$)')) {
+      $tmpUp = Join-Path $invRoot (".__upgrade_{0}.csv" -f ([guid]::NewGuid()))
+      # nuevo encabezado = encabezado viejo + ;Tamano_GB_Texto
+      ($hdr + ';Tamano_GB_Texto') | Out-File -LiteralPath $tmpUp -Encoding utf8BOM
+      # copiar todas las filas antiguas agregando ';' final (columna vacía)
+      Get-Content -LiteralPath $sumCsv | Select-Object -Skip 1 | ForEach-Object { ($_ + ';') } |
+        Add-Content -LiteralPath $tmpUp -Encoding UTF8
+      Move-Item -LiteralPath $tmpUp -Destination $sumCsv -Force
+      $mustHeader = $false
     }
   }
 
-  # 2.2 Escritura normal
-  Ensure-CsvHeaderUtf8Bom -Path $sumCsv -HeaderLine $header
-  Append-LinesUtf8Retry   -Path $sumCsv -Lines @($dataLine)
-  Write-Log "resumen-conciliaciones.csv actualizado para '$subcarpeta' (Bytes=$bytes, GB=$gb)"
+  # Exportamos la fila a un temporal en UTF-8 BOM y delimitador ';'
+  $tmp = Join-Path $invRoot (".__tmp_inv_{0}.csv" -f ([guid]::NewGuid()))
+  $row | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding utf8BOM -Delimiter ';'
 
+  if ($mustHeader) {
+    # primera vez: movemos el archivo completo con BOM y encabezado
+    Move-Item -LiteralPath $tmp -Destination $sumCsv -Force
+  } else {
+    # anexamos sin duplicar encabezado
+    $lines = Get-Content -LiteralPath $tmp
+    if ($lines.Count -gt 1) {
+      $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
+    }
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  }
 }
 catch {
   Write-Log "WARN: No se pudo actualizar resumen-conciliaciones.csv -> $($_.Exception.Message)" 'WARN'
@@ -639,4 +646,4 @@ catch {
 finally {
   if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
 }
-# ===== FIN CSV centralizado =====
+# ===== FIN CSV centralizado de inventarios =====
