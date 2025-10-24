@@ -86,7 +86,7 @@ param(
   [switch]$DoUpload,      # default: false
 
   [string]$InventorySummaryCsv,
-[string]$UploadSummaryCsv,
+[string]$UploadSummaryCsv
 
 
 )
