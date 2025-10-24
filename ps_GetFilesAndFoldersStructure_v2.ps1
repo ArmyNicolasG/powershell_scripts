@@ -39,6 +39,44 @@ param(
 )
 
 # ---------- Helpers base ----------
+function New-NamedMutex { param([string]$Name) [System.Threading.Mutex]::new($false, "Global\$Name") }
+
+function Ensure-CsvHeaderUtf8Bom {
+  param([Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$HeaderLine)
+  if (-not (Test-Path -LiteralPath $Path)) {
+    $lp = Add-LongPathPrefix (Convert-ToSystemPath $Path)
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+    $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::CreateNew,
+                                 [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($true)) # BOM
+    $sw.WriteLine($HeaderLine); $sw.Dispose(); $fs.Dispose()
+  }
+}
+
+function Append-LinesUtf8Retry {
+  param([Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Lines,
+        [int]$MaxRetries = 40, [int]$InitialDelayMs = 120)
+  $lp = Add-LongPathPrefix (Convert-ToSystemPath $Path)
+  [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+  $attempt = 0
+  while ($true) {
+    try {
+      $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append,
+                                   [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+      $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($false))
+      foreach ($l in $Lines) { $sw.WriteLine($l) }
+      $sw.Dispose(); $fs.Dispose()
+      break
+    } catch [System.IO.IOException],[System.UnauthorizedAccessException] {
+      if ($attempt -ge $MaxRetries) { throw }
+      Start-Sleep -Milliseconds ([int]($InitialDelayMs * [math]::Pow(1.25, $attempt)))
+      $attempt++
+    }
+  }
+}
+
 function Convert-ToSystemPath {
   param([string]$AnyPath)
   try { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AnyPath) }
@@ -534,51 +572,62 @@ Write-Log "INFO -> $InfoTxt"
 if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
 
 
-# ===== CSV centralizado de inventarios (compatible Excel) =====
+# ===== CSV centralizado de inventarios (robusto + Excel) =====
 try {
-  # Carpeta de la subcarpeta (nombre visible) y raíz del log de inventario
   $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
   $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))
   $sumCsv      = Join-Path $invRoot 'resumen-conciliaciones.csv'
 
-  # Cálculo en GB con más precisión
+  # Si TotalBytes no viene (por no usar -ComputeRootSize), intenta folder-info.txt
   [int64]$bytes = $TotalBytes
-  [double]$gb   = 0
-  if ($bytes -gt 0) { $gb = [math]::Round(([double]$bytes / 1073741824), 6) }
-
-  # Fila a escribir (propiedades = encabezados). ¡Sin “ñ”!
-  $row = [pscustomobject]@{
-    'Subcarpeta'               = $subcarpeta
-    'Tamano_Bytes'             = $bytes
-    'Tamano_GB'                = $gb
-    'Carpetas_inaccesibles'    = $InaccessibleFolders
-    'Carpetas_accesibles'      = $AccessibleFolders
-    'Archivos_accesibles'      = $AccessibleFiles
-    'Archivos_inaccesibles'    = $InaccessibleFiles
+  if ($bytes -le 0) {
+    $fi = Join-Path $LogDir 'folder-info.txt'
+    if (Test-Path -LiteralPath $fi) {
+      foreach($line in (Get-Content -LiteralPath $fi -ErrorAction SilentlyContinue)) {
+        if ($line -match '^\s*TotalBytes:\s*(\d+)\s*$') { $bytes = [int64]$matches[1]; break }
+      }
+    }
   }
+  [double]$gb = if ($bytes -gt 0) { [math]::Round(($bytes / 1073741824.0), 6) } else { 0 }
 
-  # Mutex global para escrituras concurrentes seguras
-  $mutex = [System.Threading.Mutex]::new($false, 'Global\inventory_summary_mutex')
+  # Encabezado amigable para Excel (sin "ñ") usando ; como separador
+  $header = 'Subcarpeta;Tamano_Bytes;Tamano_GB;Carpetas_inaccesibles;Carpetas_accesibles;Archivos_accesibles;Archivos_inaccesibles'
+
+  # Valor CSV entrecomillado y separado por ';'
+  $sep = ';'
+  $vals = @(
+    $subcarpeta,
+    "$bytes",
+    "$gb",
+    "$InaccessibleFolders",
+    "$AccessibleFolders",
+    "$AccessibleFiles",
+    "$InaccessibleFiles"
+  ) | ForEach-Object { $_ -replace '"','""' }
+  $dataLine = '"' + ($vals -join ('"' + $sep + '"')) + '"'
+
+  $mutex = New-NamedMutex -Name 'inventory_summary_mutex'
   $null  = $mutex.WaitOne()
 
-  # Si no existe, escribimos cabecera con UTF-8 BOM; luego anexamos sin cabecera
-  $mustHeader = -not (Test-Path -LiteralPath $sumCsv)
+  $orphans = Get-ChildItem -LiteralPath $invRoot -File -Filter '.__tmp_inv_*.csv' -ErrorAction SilentlyContinue
+  if ($orphans) {
+    Ensure-CsvHeaderUtf8Bom -Path $sumCsv -HeaderLine $header
+    foreach ($t in $orphans) {
+      $lines = Get-Content -LiteralPath $t -ErrorAction SilentlyContinue
+      if ($lines.Count -gt 1) {
+        Append-LinesUtf8Retry -Path $sumCsv -Lines $lines[1..($lines.Count-1)]
+        Write-Log "resumen-conciliaciones.csv actualizado para '$subcarpeta' (Bytes=$bytes, GB=$gb)"
 
-  # Exportamos a un temporal en UTF-8 BOM y ; como separador
-  $tmp = Join-Path $invRoot (".__tmp_inv_{0}.csv" -f ([guid]::NewGuid()))
-  $row | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding utf8BOM -Delimiter ';'
-
-  if ($mustHeader) {
-    Move-Item -LiteralPath $tmp -Destination $sumCsv -Force
-  } else {
-    # Quitamos cabecera del temporal y anexamos sus filas al CSV maestro
-    $lines = Get-Content -LiteralPath $tmp
-    if ($lines.Count -gt 1) {
-      # El archivo maestro ya tiene BOM en la primera línea; las anexadas pueden ir sin BOM.
-      $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
+      }
+      Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
   }
+
+  # 2.2 Escritura normal
+  Ensure-CsvHeaderUtf8Bom -Path $sumCsv -HeaderLine $header
+  Append-LinesUtf8Retry   -Path $sumCsv -Lines @($dataLine)
+  Write-Log "resumen-conciliaciones.csv actualizado para '$subcarpeta' (Bytes=$bytes, GB=$gb)"
+
 }
 catch {
   Write-Log "WARN: No se pudo actualizar resumen-conciliaciones.csv -> $($_.Exception.Message)" 'WARN'
@@ -586,4 +635,4 @@ catch {
 finally {
   if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
 }
-# ===== FIN CSV centralizado de inventarios =====
+# ===== FIN CSV centralizado =====
