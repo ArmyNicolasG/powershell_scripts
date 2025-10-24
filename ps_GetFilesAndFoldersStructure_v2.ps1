@@ -575,18 +575,20 @@ Write-Log "INFO -> $InfoTxt"
 if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
 
 
-# ===== CSV centralizado de inventarios (compatible Excel, robusto) =====
+# ===== CSV centralizado de inventarios (compatible Excel, robusto, sin duplicados) =====
 try {
   $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
   $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))
   $sumCsv      = Join-Path $invRoot 'resumen-conciliaciones.csv'
 
-  # -- cálculo GB y texto (como ya habíamos hecho) --
+  # -- cálculo GB + texto (es-ES) --
   [int64]$bytes = $TotalBytes
-  [double]$gb = 0.0
+  [double]$gb   = 0.0
   if ($bytes -gt 0) { $gb = [math]::Round(([double]$bytes / 1GB), 6) }
   $es = [System.Globalization.CultureInfo]::GetCultureInfo('es-ES')
   $gb_texto = $gb.ToString('0.######', $es)
+
+  $nowStr = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
 
   $row = [pscustomobject]@{
     'Subcarpeta'               = $subcarpeta
@@ -597,82 +599,109 @@ try {
     'Carpetas_accesibles'      = $AccessibleFolders
     'Archivos_accesibles'      = $AccessibleFiles
     'Archivos_inaccesibles'    = $InaccessibleFiles
+    'FechaHora'                = $nowStr
   }
 
-  # Mutex global (fallback local si el global no existe)
+  # Mutex global (fallback local)
   $mutex = $null
   try   { $mutex = [System.Threading.Mutex]::new($false,'Global\inventory_summary_mutex') }
   catch { $mutex = [System.Threading.Mutex]::new($false,'inventory_summary_mutex') }
   $null = $mutex.WaitOne()
 
-  # --------- RECOVERY de temporales orfanos ----------
+  # ---------- util: Exporta tabla a csv (con ; y BOM) ----------
+  function Export-Table([array]$data,[string]$path){
+    $retry=0; while($true){
+      try { $data | Export-Csv -LiteralPath $path -NoTypeInformation -Delimiter ';' -Encoding utf8BOM; break }
+      catch [System.UnauthorizedAccessException],[System.IO.IOException] {
+        if ($retry -ge 12) { throw }; Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
+      }
+    }
+  }
+
+  # ---------- Carga segura del maestro (si existe) ----------
+  $master = @()
+  if (Test-Path -LiteralPath $sumCsv) {
+    try {
+      $master = Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8
+    } catch {
+      # si falla lectura por lock, reintenta breve
+      $retry=0; while($true){
+        try { $master = Import-Csv -LiteralPath $sumCsv -Delimiter ';' -Encoding UTF8; break }
+        catch {
+          if ($retry -ge 12) { throw }
+          Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
+        }
+      }
+    }
+  }
+
+  # ---------- Migración de encabezados si faltan ----------
+  $needGBText = ($master.Count -gt 0 -and -not ($master[0].PSObject.Properties.Name -contains 'Tamano_GB_Texto'))
+  $needFecha  = ($master.Count -gt 0 -and -not ($master[0].PSObject.Properties.Name -contains 'FechaHora'))
+  if ($needGBText -or $needFecha) {
+    foreach($r in $master){
+      if ($needGBText -and -not $r.PSObject.Properties.Match('Tamano_GB_Texto')) {
+        $val = if ($r.Tamano_GB) { ([double]$r.Tamano_GB).ToString('0.######',$es) } else { '' }
+        Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val
+      }
+      if ($needFecha -and -not $r.PSObject.Properties.Match('FechaHora')) {
+        Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue ''
+      }
+    }
+  }
+
+  # ---------- Sweeper de órfanos + consolidación ----------
+  $tmpRows = @()
   Get-ChildItem -LiteralPath $invRoot -Filter '.__tmp_inv_*.csv' -File -ErrorAction SilentlyContinue | ForEach-Object {
     try {
-      # anexar contenido de cada tmp al maestro (creándolo si no existe)
-      if (-not (Test-Path -LiteralPath $sumCsv)) {
-        Move-Item -LiteralPath $_.FullName -Destination $sumCsv -Force
-      } else {
-        $lines = Get-Content -LiteralPath $_.FullName
-        if ($lines.Count -gt 1) {
-          # quita cabecera del tmp
-          $retry=0; while ($true) {
-            try { $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8; break }
-            catch [System.UnauthorizedAccessException],[System.IO.IOException] {
-              if ($retry -ge 12) { throw }
-              Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry)); $retry++
-            }
+      $rows = Import-Csv -LiteralPath $_.FullName -Delimiter ';' -Encoding UTF8
+      if ($rows) {
+        # Asegura columnas nuevas si vienen de versiones previas
+        foreach($r in $rows){
+          if (-not $r.PSObject.Properties.Match('Tamano_GB_Texto')) {
+            $val = if ($r.Tamano_GB) { ([double]$r.Tamano_GB).ToString('0.######',$es) } else { '' }
+            Add-Member -InputObject $r -NotePropertyName 'Tamano_GB_Texto' -NotePropertyValue $val
+          }
+          if (-not $r.PSObject.Properties.Match('FechaHora')) {
+            Add-Member -InputObject $r -NotePropertyName 'FechaHora' -NotePropertyValue ''
           }
         }
-        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        $tmpRows += $rows
       }
+      Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
     } catch {
-      # si no se pudo, deja el tmp; se intentará en la próxima ejecución
+      # Si algo falla, deja el tmp para un próximo intento
     }
   }
 
-  # --------- Migración de encabezado (si falta Tamano_GB_Texto) ----------
-  $mustHeader = -not (Test-Path -LiteralPath $sumCsv)
-  if (-not $mustHeader) {
-    $hdr = (Get-Content -LiteralPath $sumCsv -TotalCount 1)
-    if ($hdr -and ($hdr -notmatch '(?:^|;)Tamano_GB_Texto(?:;|$)')) {
-      $tmpUp = Join-Path $invRoot (".__upgrade_{0}.csv" -f ([guid]::NewGuid()))
-      ($hdr + ';Tamano_GB_Texto') | Out-File -LiteralPath $tmpUp -Encoding utf8BOM
-      Get-Content -LiteralPath $sumCsv | Select-Object -Skip 1 | ForEach-Object { ($_ + ';') } |
-        Add-Content -LiteralPath $tmpUp -Encoding UTF8
-      Move-Item -LiteralPath $tmpUp -Destination $sumCsv -Force
-      $mustHeader = $false
-    }
-  }
+  # ---------- UPsert: 1 fila por Subcarpeta (preferimos la más reciente) ----------
+  $all = @($master + $tmpRows)
 
-  # --------- Escribir nueva fila con reintentos ----------
-  $tmp = Join-Path $invRoot (".__tmp_inv_{0}.csv" -f ([guid]::NewGuid()))
-  $row | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding utf8BOM -Delimiter ';'
+  # Reemplaza/crea la fila de la subcarpeta actual
+  $all = $all | Where-Object { $_.Subcarpeta -ne $subcarpeta }
+  $all += $row
 
-  if ($mustHeader) {
-    Move-Item -LiteralPath $tmp -Destination $sumCsv -Force
-    $tmp = $null
-  } else {
-    $lines = Get-Content -LiteralPath $tmp
-    if ($lines.Count -gt 1) {
-      $retry=0; while ($true) {
-        try {
-          $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
-          break
-        } catch [System.UnauthorizedAccessException],[System.IO.IOException] {
-          if ($retry -ge 12) { throw }  # ~12 reintentos ~ hasta ~6–8 s
-          Start-Sleep -Milliseconds (250 * [math]::Pow(1.6,$retry))
-          $retry++
-        }
+  # Si aún quedaran duplicados por sweep (mismo nombre), nos quedamos con la más reciente por FechaHora
+  $all =
+    $all |
+    Group-Object Subcarpeta |
+    ForEach-Object {
+      if ($_.Count -gt 1 -and ($_.Group | Where-Object { $_.FechaHora })) {
+        $_.Group | Sort-Object { try { [datetime]$_.FechaHora } catch { Get-Date '1900-01-01' } } -Descending | Select-Object -First 1
+      } else {
+        $_.Group | Select-Object -Last 1
       }
     }
-  }
+
+  # ---------- Guardar maestro ----------
+  $tmpOut = Join-Path $invRoot (".__rewrite_{0}.csv" -f ([guid]::NewGuid()))
+  Export-Table -data $all -path $tmpOut
+  Move-Item -LiteralPath $tmpOut -Destination $sumCsv -Force
 }
 catch {
   Write-Log "WARN: No se pudo actualizar resumen-conciliaciones.csv -> $($_.Exception.Message)" 'WARN'
 }
 finally {
-  if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
   if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
 }
 # ===== FIN CSV centralizado =====
-
