@@ -21,6 +21,7 @@
 .PARAMETER SanitizeNames     Sanea/renombra SOLO si el nombre es inválido.
 .PARAMETER MaxNameLength     Longitud máxima de NOMBRE (no ruta), por defecto 255.
 .PARAMETER ReplacementChar   Carácter de reemplazo para inválidos, por defecto "_".
+.PARAMETER InventorySummaryCsv Ruta al archivo CSV de resumen de inventario centralizado (opcional).
 #>
 
 [CmdletBinding()]
@@ -36,6 +37,8 @@ param(
   [switch]$SanitizeNames,
   [int]$MaxNameLength = 255,
   [string]$ReplacementChar = "_"
+  [string]$InventorySummaryCsv
+
 )
 
 # ---------- Helpers base ----------
@@ -573,6 +576,7 @@ if ($ComputeRootSize) { Write-Log "TotalBytes=$TotalBytes" }
 
 
 # ===== CSV centralizado de inventarios (robusto + Excel) =====
+if (-not $InventorySummaryCsv) { Write-Log "InventorySummaryCsv no especificado: se omite CSV centralizado."; return }
 try {
   $subcarpeta  = (Split-Path -Leaf (Convert-ToSystemPath $Path))
   $invRoot     = (Split-Path -Parent (Convert-ToSystemPath $LogDir))

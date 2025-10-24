@@ -52,6 +52,9 @@
 
 .PARAMETER GenerateStatusReports
   Si se indica, genera CSVs separados por tipo/estado leyendo SOLO los logs nativos.
+
+.PARAMETER UploadSummaryCsv
+  Ruta al archivo CSV de resumen de carga centralizado (opcional).
 #>
 
 [CmdletBinding()]
@@ -73,9 +76,49 @@ param(
   [switch]$GenerateStatusReports,
   [ValidateSet('ERROR','INFO','WARNING','PANIC')][string]$NativeLogLevel = 'ERROR',
   [ValidateSet('essential','quiet','info')][string]$ConsoleOutputLevel = 'essential'
+  [string]$UploadSummaryCsv
+
 )
 
 # ---------- Helpers base ----------
+function New-NamedMutex { param([string]$Name) [System.Threading.Mutex]::new($false, "Global\$Name") }
+
+function Ensure-CsvHeaderUtf8Bom {
+  param([Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$HeaderLine)
+  if (-not (Test-Path -LiteralPath $Path)) {
+    $lp = Add-LongPathPrefix (Convert-ToSystemPath $Path)
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+    $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::CreateNew,
+                                 [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($true)) # BOM
+    $sw.WriteLine($HeaderLine); $sw.Dispose(); $fs.Dispose()
+  }
+}
+
+function Append-LinesUtf8Retry {
+  param([Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Lines,
+        [int]$MaxRetries = 40, [int]$InitialDelayMs = 120)
+  $lp = Add-LongPathPrefix (Convert-ToSystemPath $Path)
+  [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($lp))
+  $attempt = 0
+  while ($true) {
+    try {
+      $fs = [System.IO.File]::Open($lp, [System.IO.FileMode]::Append,
+                                   [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+      $sw = New-Object System.IO.StreamWriter($fs, [System.Text.UTF8Encoding]::new($false))
+      foreach ($l in $Lines) { $sw.WriteLine($l) }
+      $sw.Dispose(); $fs.Dispose()
+      break
+    } catch [System.IO.IOException],[System.UnauthorizedAccessException] {
+      if ($attempt -ge $MaxRetries) { throw }
+      Start-Sleep -Milliseconds ([int]($InitialDelayMs * [math]::Pow(1.25, $attempt)))
+      $attempt++
+    }
+  }
+}
+
 function Convert-ToSystemPath {
   param([string]$AnyPath)
   try { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AnyPath) }
@@ -265,50 +308,66 @@ if ($GenerateStatusReports) {
   Write-Log "summary.txt -> $sumPath"
 }
 
-## ---------- Anexar fila a resumen-consolidado de subidas ----------
+# ---------- CSV centralizado de subidas (robusto + Excel) ----------
 try {
-  $folderName = Split-Path -Path $SourceRoot -Leaf
-  $uploadRoot = Split-Path -Path $LogDir -Parent
-  $sumCsv     = Join-Path $uploadRoot 'resumen-subidas.csv'
+  if ($UploadSummaryCsv) {
+    $folderName = Split-Path -Path $SourceRoot -Leaf
 
-  # Garantiza cabecera
-  if (-not (Test-Path -LiteralPath $sumCsv)) {
-    'Subcarpeta,JobID,Estado,TotalTransfers,Completados,Fallidos,Saltados,BytesTransferidos,Duracion,FechaHora,LogWrapper' |
-      Out-File -LiteralPath $sumCsv -Encoding UTF8
+    # Encabezado amigable para Excel (sin 'ñ'), separador ';'
+    $header = 'Subcarpeta;JobID;Estado;TotalTransfers;Completados;Fallidos;Saltados;BytesTransferidos;Duracion;FechaHora;LogWrapper'
+
+    # Línea de datos, siempre entrecomillada por campo
+    $sep = ';'
+    $vals = @(
+      $folderName
+      $summary.JobID
+      $summary.Status
+      $summary.TotalTransfers
+      $summary.TransfersCompleted
+      $summary.TransfersFailed
+      $summary.TransfersSkipped
+      $summary.BytesTransferred
+      $summary.Elapsed
+      (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+      $script:LogPath
+    ) | ForEach-Object { "$_" -replace '"','""' }
+    $dataLine = '"' + ($vals -join ('"' + $sep + '"')) + '"'
+
+    # Mutex global para escrituras atómicas entre procesos/ventanas
+    $mutex = New-NamedMutex -Name 'upload_summary_mutex'
+    $null  = $mutex.WaitOne()
+
+    # Fase de reparación: fusiona huérfanos antiguos si existieran
+    $sumDir = Split-Path -Parent (Convert-ToSystemPath $UploadSummaryCsv)
+    $orphans = Get-ChildItem -LiteralPath $sumDir -File -Filter '.__tmp_up_*.csv' -ErrorAction SilentlyContinue
+    if ($orphans) {
+      Ensure-CsvHeaderUtf8Bom -Path $UploadSummaryCsv -HeaderLine $header
+      foreach ($t in $orphans) {
+        $lines = Get-Content -LiteralPath $t -ErrorAction SilentlyContinue
+        if ($lines.Count -gt 1) {
+          Append-LinesUtf8Retry -Path $UploadSummaryCsv -Lines $lines[1..($lines.Count-1)]
+        }
+        Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue
+      }
+    }
+
+    # Escritura normal
+    Ensure-CsvHeaderUtf8Bom -Path $UploadSummaryCsv -HeaderLine $header
+    Append-LinesUtf8Retry   -Path $UploadSummaryCsv -Lines @($dataLine)
+
+    Write-Log "UploadSummaryCsv actualizado -> $UploadSummaryCsv"
   }
-
-  # Mutex (Global -> fallback a local si falla)
-  $mutex = $null
-  try   { $mutex = [System.Threading.Mutex]::new($false, 'Global\upload_summary_mutex') }
-  catch { $mutex = [System.Threading.Mutex]::new($false, 'upload_summary_mutex') }
-  $null  = $mutex.WaitOne()
-
-  $row = [pscustomobject]@{
-    Subcarpeta        = $folderName
-    JobID             = $summary.JobID
-    Estado            = $summary.Status
-    TotalTransfers    = $summary.TotalTransfers
-    Completados       = $summary.TransfersCompleted
-    Fallidos          = $summary.TransfersFailed
-    Saltados          = $summary.TransfersSkipped
-    BytesTransferidos = $summary.BytesTransferred
-    Duracion          = $summary.Elapsed
-    FechaHora         = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    LogWrapper        = $script:LogPath
+  else {
+    Write-Log "UploadSummaryCsv no especificado: se omite CSV centralizado (modo standalone)."
   }
-
-  # Append (sin duplicar cabecera)
-  $tmp = Join-Path $uploadRoot (".__tmp_{0}.csv" -f ([guid]::NewGuid()))
-  $row | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding UTF8
-  $lines = Get-Content -LiteralPath $tmp
-  if ($lines.Count -gt 1) {
-    $lines[1..($lines.Count-1)] | Add-Content -LiteralPath $sumCsv -Encoding UTF8
-  }
-  Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+}
+catch {
+  Write-Log "WARN: No se pudo actualizar UploadSummaryCsv -> $($_.Exception.Message)" 'WARN'
 }
 finally {
   if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
 }
+
 
 
 Write-Log "Logs nativos de AzCopy -> $AzNative"

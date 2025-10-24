@@ -47,6 +47,12 @@
 .PARAMETER DoInventory
   Si se indica, ejecuta el script de inventario, sino, no se ejecutará ninguna operación de inventario.
 
+.PARAMETER InventorySummaryCsv
+  Si se indica, se generará un CSV de resumen de inventario centralizado, sino, se guardará este archivo en el InventoryLogRoot.
+
+.PARAMETER UploadSummaryCsv
+  Si se indica, se generará un CSV de resumen de subida centralizado, sino, se guardará este archivo en el UploadLogRoot.
+
 .OUTPUTS
   Crea <UploadLogRoot>\summary.csv con columnas: Folder, Inv_* y Az_* + Diff/FailedCount.
 #>
@@ -79,6 +85,10 @@ param(
   [switch]$DoInventory,   # default: false
   [switch]$DoUpload      # default: false
 
+  [string]$InventorySummaryCsv,
+[string]$UploadSummaryCsv,
+
+
 )
 
 
@@ -106,6 +116,15 @@ if (-not $DoInventory -and -not $DoUpload) {
 $root = (Resolve-Path -LiteralPath $RootPath).Path
 Ensure-Dir $InventoryLogRoot
 Ensure-Dir $UploadLogRoot
+
+# Defaults para CSVs centralizados si no se especifican
+if (-not $InventorySummaryCsv -or [string]::IsNullOrWhiteSpace($InventorySummaryCsv)) {
+  $InventorySummaryCsv = Join-Path $InventoryLogRoot 'resumen-conciliaciones.csv'
+}
+if (-not $UploadSummaryCsv -or [string]::IsNullOrWhiteSpace($UploadSummaryCsv)) {
+  $UploadSummaryCsv = Join-Path $UploadLogRoot 'resumen-subidas.csv'
+}
+
 
 # Archivos sueltos a subcarpeta
 $looseFolder = Join-Path $root 'Archivos sueltos pre-migracion'
@@ -143,10 +162,19 @@ if ($OpenNewWindows) {
 
 $cmd = @"
 `$ErrorActionPreference='Continue';
-$(if($DoInventory){ "Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ==='; `n& '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'}); `n" })
-$(if($DoUpload){    "Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';    `n& '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB; `n" })
+$(if($DoInventory){
+  "Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ===';
+   & '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'}) -InventorySummaryCsv '$InventorySummaryCsv';
+"
+})
+$(if($DoUpload){
+  "Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
+   & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv';
+"
+})
 Write-Host '=== ($name) FINALIZADO ===';
 "@
+
 
     Start-Process -FilePath $pwshExe -ArgumentList @('-NoLogo','-NoExit','-Command', $cmd) | Out-Null
     Info "Ventana lanzada para: $name"
@@ -169,7 +197,9 @@ function Invoke-FolderWork {
     [switch]$PreservePermissions,
     [int]$MaxLogSizeMB = 64,
     [switch]$DoInventory,
-    [switch]$DoUpload
+    [switch]$DoUpload,
+    [string]$InventorySummaryCsv,
+    [string]$UploadSummaryCsv
   )
 
   $folderName = Split-Path $Folder -Leaf
@@ -178,30 +208,36 @@ function Invoke-FolderWork {
   New-Item -ItemType Directory -Force -Path $invLogDir,$uplLogDir | Out-Null
 
   if ($DoInventory) {
-    Write-Host "[INFO] [$folderName] Inventario -> $invLogDir"
-    $invArgs = @{ Path = $Folder; LogDir = $invLogDir }
-    if ($ComputeRootSize) { $invArgs.ComputeRootSize = $true }
-    & $InventoryScript @invArgs 2>&1 | ForEach-Object { Write-Host $_ }
-  }
+  Write-Host "[INFO] [$folderName] Inventario -> $invLogDir"
+  $invArgs = @{ Path = $Folder; LogDir = $invLogDir }
+  if ($ComputeRootSize) { $invArgs.ComputeRootSize = $true }
+  $invArgs.InventorySummaryCsv = $InventorySummaryCsv
+  & $InventoryScript @invArgs 2>&1 | ForEach-Object { Write-Host $_ }
+}
+
 
   if ($DoUpload) {
-    Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
-    $destUrlSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
-    $uplArgs = @{
-      SourceRoot        = $Folder
-      StorageAccount    = $StorageAccount
-      ShareName         = $ShareName
-      DestSubPath       = $destUrlSub
-      Sas               = $Sas
-      ServiceType       = $ServiceType
-      LogDir            = $uplLogDir
-      AzCopyPath        = $AzCopyPath
-      Overwrite         = $Overwrite
-      MaxLogSizeMB      = $MaxLogSizeMB
-    }
-    if ($PreservePermissions) { $uplArgs.PreservePermissions = $true }
-    & $UploadScript @uplArgs 2>&1 | ForEach-Object { Write-Host $_ }
+  Write-Host "[INFO] [$folderName] Subida -> $uplLogDir"
+  $destUrlSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
+
+  $uplArgs = @{
+    SourceRoot     = $Folder
+    StorageAccount = $StorageAccount
+    ShareName      = $ShareName
+    DestSubPath    = $destUrlSub
+    Sas            = $Sas
+    ServiceType    = $ServiceType
+    LogDir         = $uplLogDir
+    AzCopyPath     = $AzCopyPath
+    Overwrite      = $Overwrite
+    MaxLogSizeMB   = $MaxLogSizeMB
+    UploadSummaryCsv = $UploadSummaryCsv
   }
+  if ($PreservePermissions) { $uplArgs.PreservePermissions = $true }
+
+  & $UploadScript @uplArgs 2>&1 | ForEach-Object { Write-Host $_ }
+}
+
 
   [pscustomobject]@{ Folder = $Folder; Status = 'Done' }
 }
@@ -228,6 +264,9 @@ $common = @{
   MaxLogSizeMB        = $MaxLogSizeMB
   DoInventory         = $DoInventory
   DoUpload            = $DoUpload
+  InventorySummaryCsv = $InventorySummaryCsv
+    UploadSummaryCsv  = $UploadSummaryCsv
+
 }
 
 
