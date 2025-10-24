@@ -588,7 +588,7 @@ try {
       }
     }
   }
-  [double]$gb = if ($bytes -gt 0) { [math]::Round(($bytes / 1073741824.0), 6) } else { 0 }
+  [double]$gb = if ($bytes -gt 0) { $bytes / 1073741824.0 } else { 0 }
 
   # Encabezado amigable para Excel (sin "ñ") usando ; como separador
   $header = 'Subcarpeta;Tamano_Bytes;Tamano_GB;Carpetas_inaccesibles;Carpetas_accesibles;Archivos_accesibles;Archivos_inaccesibles'
