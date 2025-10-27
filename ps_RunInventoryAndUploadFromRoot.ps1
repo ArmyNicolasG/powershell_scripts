@@ -60,16 +60,16 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string]$RootPath,
-  [Parameter(Mandatory)][string]$InventoryScript,
-  [Parameter(Mandatory)][string]$UploadScript,
+  [Parameter][string]$InventoryScript,
+  [Parameter][string]$UploadScript,
 
-  [Parameter(Mandatory)][string]$InventoryLogRoot,
-  [Parameter(Mandatory)][string]$UploadLogRoot,
+  [Parameter][string]$InventoryLogRoot,
+  [Parameter][string]$UploadLogRoot,
 
-  [Parameter(Mandatory)][string]$StorageAccount,
-  [Parameter(Mandatory)][string]$ShareName,
-  [Parameter(Mandatory)][string]$DestBaseSubPath,
-  [Parameter(Mandatory)][string]$Sas,
+  [Parameter][string]$StorageAccount,
+  [Parameter][string]$ShareName,
+  [Parameter][string]$DestBaseSubPath,
+  [Parameter][string]$Sas,
 
   [ValidateSet('FileShare','Blob')][string]$ServiceType = 'FileShare',
   [ValidateSet('ifSourceNewer','true','false','prompt')][string]$Overwrite = 'ifSourceNewer',
