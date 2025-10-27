@@ -59,20 +59,39 @@
 
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory)][string]$RootPath,
-  [Parameter][string]$InventoryScript,
-  [Parameter][string]$UploadScript,
+  [Parameter(Mandatory = $true)]
+  [string]$RootPath,
 
-  [Parameter][string]$InventoryLogRoot,
-  [Parameter][string]$UploadLogRoot,
+  [Parameter()]
+  [string]$InventoryScript,
 
-  [Parameter][string]$StorageAccount,
-  [Parameter][string]$ShareName,
-  [Parameter][string]$DestBaseSubPath,
-  [Parameter][string]$Sas,
+  [Parameter()]
+  [string]$UploadScript,
 
-  [ValidateSet('FileShare','Blob')][string]$ServiceType = 'FileShare',
-  [ValidateSet('ifSourceNewer','true','false','prompt')][string]$Overwrite = 'ifSourceNewer',
+  [Parameter()]
+  [string]$InventoryLogRoot,
+
+  [Parameter()]
+  [string]$UploadLogRoot,
+
+  [Parameter()]
+  [string]$StorageAccount,
+
+  [Parameter()]
+  [string]$ShareName,
+
+  [Parameter()]
+  [string]$DestBaseSubPath,
+
+  [Parameter()]
+  [string]$Sas,
+
+  [ValidateSet('FileShare','Blob')]
+  [string]$ServiceType = 'FileShare',
+
+  [ValidateSet('ifSourceNewer','true','false','prompt')]
+  [string]$Overwrite = 'ifSourceNewer',
+
   [switch]$PreservePermissions,
   [string]$AzCopyPath = 'azcopy',
   [int]$MaxLogSizeMB = 64,
@@ -86,10 +105,9 @@ param(
   [switch]$DoUpload,      # default: false
 
   [string]$InventorySummaryCsv,
-[string]$UploadSummaryCsv
-
-
+  [string]$UploadSummaryCsv
 )
+
 
 
 
