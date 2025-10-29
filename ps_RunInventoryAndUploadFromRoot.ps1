@@ -181,46 +181,66 @@ if ($IncludeLooseFilesAsFolder -and (Test-Path -LiteralPath $looseFolder)) {
 }
 if ($folders.Count -eq 0) { Info "No hay subcarpetas para procesar."; return }
 
-# ---------------- Filtro por -DoOnly y/o -Exclude ----------------
-$doOnlySet  = Parse-NameList $DoOnly
-$excludeSet = Parse-NameList $Exclude
+# ---------------- Filtro por -DoOnly y/o -Exclude (coincidencia EXACTA, robusta) ----------------
+function Normalize-Name([string]$s) {
+  if ([string]::IsNullOrWhiteSpace($s)) { return '' }
+  # No colapsar espacios internos; solo normalizar forma Unicode y recortar extremos.
+  return $s.Trim().Normalize([System.Text.NormalizationForm]::FormKC)
+}
 
-# Mapea nombres reales (exactamente como aparecen en el FS)
-$allNames = $folders.Name
+# Construye índice exacto: nombre normalizado -> objeto DirectoryInfo (o similar)
+$index = @{}
+foreach ($d in $folders) {
+  $key = Normalize-Name $d.Name
+  if (-not $index.ContainsKey($key)) { $index[$key] = $d }
+}
 
-# Si hay DoOnly, nos quedamos solo con intersección
-if ($doOnlySet.Count -gt 0) {
-  $notFound = @()
-  $folders = $folders | Where-Object {
-    if ($doOnlySet.Contains($_.Name)) { $true } else { $false }
+# Convierte entradas de -DoOnly/-Exclude en listas normalizadas (sin colapsar espacios dobles)
+$doOnlyList  = @()
+$excludeList = @()
+if ($DoOnly)  { $doOnlyList  = ($DoOnly  -split ';') | ForEach-Object { Normalize-Name $_ } | Where-Object { $_ -ne '' } }
+if ($Exclude) { $excludeList = ($Exclude -split ';') | ForEach-Object { Normalize-Name $_ } | Where-Object { $_ -ne '' } }
+
+# Si hay DoOnly: seleccionar SOLO esas carpetas por igualdad exacta
+if ($doOnlyList.Count -gt 0) {
+  $selected = New-Object System.Collections.Generic.List[object]
+  $missing  = New-Object System.Collections.Generic.List[string]
+  foreach ($wanted in $doOnlyList) {
+    if ($index.ContainsKey($wanted)) {
+      $selected.Add($index[$wanted]) | Out-Null
+    } else {
+      $missing.Add($wanted) | Out-Null
+    }
   }
-  # Reporta los solicitados que no existen
-  foreach($n in $doOnlySet){
-    if ($allNames -notcontains $n) { $notFound += $n }
-  }
-  if ($notFound.Count -gt 0) {
-    Warn ("-DoOnly: carpetas no encontradas -> {0}" -f ($notFound -join '; '))
+  $folders = $selected.ToArray()
+  if ($missing.Count -gt 0) {
+    Warn ("-DoOnly: carpetas no encontradas -> {0}" -f (($missing | ForEach-Object { $_ }) -join '; '))
   }
 }
 
-# Si hay Exclude, las quitamos
-if ($excludeSet.Count -gt 0) {
-  $toExcludeFound = @()
-  $folders = $folders | Where-Object {
-    $exc = $excludeSet.Contains($_.Name)
-    if ($exc) { $toExcludeFound += $_.Name }
-    -not $exc
+# Si hay Exclude: quitar EXACTAMENTE esas carpetas
+if ($excludeList.Count -gt 0 -and $folders.Count -gt 0) {
+  $excludeSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($e in $excludeList) { [void]$excludeSet.Add($e) }
+
+  $kept = New-Object System.Collections.Generic.List[object]
+  $foundExcluded = New-Object System.Collections.Generic.List[string]
+  foreach ($d in $folders) {
+    $k = Normalize-Name $d.Name
+    if ($excludeSet.Contains($k)) { $foundExcluded.Add($d.Name) | Out-Null }
+    else                          { $kept.Add($d) | Out-Null }
   }
-  if ($toExcludeFound.Count -gt 0) {
-    Info ("-Exclude: excluidas -> {0}" -f (($toExcludeFound | Select-Object -Unique) -join '; '))
+  $folders = $kept.ToArray()
+
+  if ($foundExcluded.Count -gt 0) {
+    Info ("-Exclude: excluidas -> {0}" -f (($foundExcluded | Select-Object -Unique) -join '; '))
   }
-  # Reporta excluidas que no existían (solo informativo)
-  $notFoundEx = @()
-  foreach($n in $excludeSet){
-    if ($allNames -notcontains $n) { $notFoundEx += $n }
-  }
-  if ($notFoundEx.Count -gt 0) {
-    Warn ("-Exclude: carpetas indicadas pero no encontradas -> {0}" -f ($notFoundEx -join '; '))
+
+  # (Opcional) Aviso sobre excluidas indicadas que no existen
+  $allNorm = $index.Keys
+  $notFoundEx = $excludeList | Where-Object { $_ -notin $allNorm }
+  if ($notFoundEx) {
+    Warn ("-Exclude: indicadas pero no encontradas -> {0}" -f ($notFoundEx -join '; '))
   }
 }
 
@@ -231,6 +251,7 @@ if ($folders.Count -eq 0) {
 }
 
 Info ("Carpetas a procesar (tras filtros): {0}" -f $folders.Count)
+
 
 
 # ---------------- Modo Ventanas ----------------
