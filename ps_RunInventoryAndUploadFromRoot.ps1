@@ -257,8 +257,20 @@ $(if($DoUpload){
 Write-Host '=== ($name) FINALIZADO ===';
 "@
 
+# Codificar el script en UTF-16LE 
+$enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
 
-    Start-Process -FilePath $pwshExe -ArgumentList @('-NoLogo','-NoExit','-Command', $cmd) | Out-Null
+
+
+    Start-Process -FilePath $pwshExe `
+  -ArgumentList @(
+    '-NoLogo',
+    '-NoExit',
+    '-NoProfile',
+    '-ExecutionPolicy','Bypass',
+    '-EncodedCommand', $enc
+  ) | Out-Null
+
     Info "Ventana lanzada para: $name"
     if ($WindowLaunchDelaySeconds -gt 0) { Start-Sleep -Seconds $WindowLaunchDelaySeconds }
   }
