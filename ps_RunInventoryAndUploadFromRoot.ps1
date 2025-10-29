@@ -105,7 +105,11 @@ param(
   [switch]$DoUpload,      # default: false
 
   [string]$InventorySummaryCsv,
-  [string]$UploadSummaryCsv
+  [string]$UploadSummaryCsv,
+
+    [string]$DoOnly,    # Lista ; separada de nombres de carpetas a procesar exclusivamente
+  [string]$Exclude    # Lista ; separada de nombres de carpetas a excluir
+
 )
 
 
@@ -119,6 +123,16 @@ function Join-UrlPath([string]$a,[string]$b){ $a=$a -replace '\\','/'; if($a -an
 function Now() { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff') }
 function Info([string]$m){ Write-Host "[$(Now)][INFO] $m" }
 function Warn([string]$m){ Write-Host "[$(Now)][WARN] $m" -ForegroundColor Yellow }
+function Parse-NameList([string]$s){
+  $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  if ([string]::IsNullOrWhiteSpace($s)) { return $set }
+  foreach($raw in ($s -split ';')){
+    $n = $raw.Trim()
+    if ($n.Length -gt 0) { [void]$set.Add($n) }
+  }
+  return $set
+}
+
 
 # --- Validación de intención ---
 if (-not $DoInventory -and -not $DoUpload) {
@@ -167,7 +181,57 @@ if ($IncludeLooseFilesAsFolder -and (Test-Path -LiteralPath $looseFolder)) {
 }
 if ($folders.Count -eq 0) { Info "No hay subcarpetas para procesar."; return }
 
-Info ("Carpetas a procesar: {0}" -f $folders.Count)
+# ---------------- Filtro por -DoOnly y/o -Exclude ----------------
+$doOnlySet  = Parse-NameList $DoOnly
+$excludeSet = Parse-NameList $Exclude
+
+# Mapea nombres reales (exactamente como aparecen en el FS)
+$allNames = $folders.Name
+
+# Si hay DoOnly, nos quedamos solo con intersección
+if ($doOnlySet.Count -gt 0) {
+  $notFound = @()
+  $folders = $folders | Where-Object {
+    if ($doOnlySet.Contains($_.Name)) { $true } else { $false }
+  }
+  # Reporta los solicitados que no existen
+  foreach($n in $doOnlySet){
+    if ($allNames -notcontains $n) { $notFound += $n }
+  }
+  if ($notFound.Count -gt 0) {
+    Warn ("-DoOnly: carpetas no encontradas -> {0}" -f ($notFound -join '; '))
+  }
+}
+
+# Si hay Exclude, las quitamos
+if ($excludeSet.Count -gt 0) {
+  $toExcludeFound = @()
+  $folders = $folders | Where-Object {
+    $exc = $excludeSet.Contains($_.Name)
+    if ($exc) { $toExcludeFound += $_.Name }
+    -not $exc
+  }
+  if ($toExcludeFound.Count -gt 0) {
+    Info ("-Exclude: excluidas -> {0}" -f (($toExcludeFound | Select-Object -Unique) -join '; '))
+  }
+  # Reporta excluidas que no existían (solo informativo)
+  $notFoundEx = @()
+  foreach($n in $excludeSet){
+    if ($allNames -notcontains $n) { $notFoundEx += $n }
+  }
+  if ($notFoundEx.Count -gt 0) {
+    Warn ("-Exclude: carpetas indicadas pero no encontradas -> {0}" -f ($notFoundEx -join '; '))
+  }
+}
+
+# Validación final
+if ($folders.Count -eq 0) {
+  Warn "Después de aplicar filtros (-DoOnly/-Exclude) no hay carpetas para procesar."
+  return
+}
+
+Info ("Carpetas a procesar (tras filtros): {0}" -f $folders.Count)
+
 
 # ---------------- Modo Ventanas ----------------
 if ($OpenNewWindows) {
