@@ -76,7 +76,9 @@ param(
   [switch]$GenerateStatusReports,
   [ValidateSet('ERROR','INFO','WARNING','PANIC')][string]$NativeLogLevel = 'ERROR',
   [ValidateSet('essential','quiet','info')][string]$ConsoleOutputLevel = 'essential',
-  [string]$UploadSummaryCsv
+  [string]$UploadSummaryCsv,
+  [Nullable[int]]$AzConcurrency,
+  [Nullable[int]]$AzBufferGB
 
 )
 
@@ -179,14 +181,17 @@ $AzNative = Join-Path $LogDir 'azcopy'
 Ensure-Directory -Dir $AzNative
 $env:AZCOPY_LOG_LOCATION = $AzNative
 
-$src = Convert-ToSystemPath $SourceRoot
+$src     = Convert-ToSystemPath $SourceRoot
 $destUrl = Build-DestUrl -StorageAccount $StorageAccount -ShareName $ShareName -DestSubPath $DestSubPath -Sas $Sas -ServiceType $ServiceType
 
+# ---- preparar ejecutable y argumentos ----
 $az = $AzCopyPath
-$args = @('copy', $src, $destUrl, '--recursive=true',
-          "--overwrite=$Overwrite",
-          '--output-level', $ConsoleOutputLevel,
-          '--log-level', $NativeLogLevel)
+$args = @(
+  'copy', $src, $destUrl, '--recursive=true',
+  "--overwrite=$Overwrite",
+  '--output-level', $ConsoleOutputLevel,
+  '--log-level',    $NativeLogLevel
+)
 if ($IncludePaths -and $IncludePaths.Count -gt 0) {
   $args += @('--include-path', ($IncludePaths -join ';'))
 }
@@ -196,6 +201,22 @@ if ($ServiceType -eq 'FileShare' -and $PreservePermissions) {
 
 Write-Log "Destino: $destUrl"
 Write-Log ("Ejecutando: {0} {1}" -f $az, ($args -join ' '))
+
+# set y  restore de las variables de entorno y  llamada azcopy
+$prevConc = $env:AZCOPY_CONCURRENCY_VALUE
+$prevBuf  = $env:AZCOPY_BUFFER_GB
+try {
+  if ($PSBoundParameters.ContainsKey('AzConcurrency')) { $env:AZCOPY_CONCURRENCY_VALUE = [string]$AzConcurrency }   # p.ej. 12
+  if ($PSBoundParameters.ContainsKey('AzBufferGB'))    { $env:AZCOPY_BUFFER_GB         = [string]$AzBufferGB }      # p.ej. 1
+  $outLines = @()
+  & $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object { Write-Log $_ 'AZCOPY' } | Out-Null
+  if ($LASTEXITCODE -ne 0) { Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN' }
+}
+finally {
+  if ($PSBoundParameters.ContainsKey('AzConcurrency')) { $env:AZCOPY_CONCURRENCY_VALUE = $prevConc }
+  if ($PSBoundParameters.ContainsKey('AzBufferGB'))    { $env:AZCOPY_BUFFER_GB         = $prevBuf  }
+}
+
 
 # ---------- Ejecución ----------
 $outLines = @()

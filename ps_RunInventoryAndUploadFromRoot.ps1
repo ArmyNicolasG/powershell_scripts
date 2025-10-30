@@ -24,6 +24,12 @@
 .PARAMETER StorageAccount, ShareName, DestBaseSubPath, Sas, ServiceType, Overwrite, PreservePermissions, AzCopyPath, MaxLogSizeMB
   Passthrough al script de subida.
 
+.PARAMETER AzConcurrency
+  Número de procesos concurrentes para cada llamada del comando AzCopy (opcional PERO IMPORTANTE PARA CARPETAS GRANDES).
+
+.PARAMETER AzBufferGB
+  Tamaño del buffer en GB para cada llamada del comando AzCopy (opcional PERO IMPORTANTE PARA CARPETAS GRANDES).
+
 .PARAMETER MaxParallel
   Cuántas subcarpetas se procesan en paralelo (sin abrir ventanas). Default: 2.
 
@@ -108,12 +114,10 @@ param(
   [string]$UploadSummaryCsv,
 
     [string]$DoOnly,    # Lista ; separada de nombres de carpetas a procesar exclusivamente
-  [string]$Exclude    # Lista ; separada de nombres de carpetas a excluir
-
+  [string]$Exclude,    # Lista ; separada de nombres de carpetas a excluir
+  [Nullable[int]]$AzConcurrency,
+  [Nullable[int]]$AzBufferGB
 )
-
-
-
 
 
 # ---------------- Helpers ----------------
@@ -272,9 +276,13 @@ $(if($DoInventory){
 })
 $(if($DoUpload){
   "Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
-   & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv';
+   & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv' " +
+   $(if($PSBoundParameters.ContainsKey('AzConcurrency')){ " -AzConcurrency $AzConcurrency" } else { "" }) +
+   $(if($PSBoundParameters.ContainsKey('AzBufferGB'))   { " -AzBufferGB $AzBufferGB"     } else { "" }) +
+   ";
 "
 })
+
 Write-Host '=== ($name) FINALIZADO ===';
 "@
 
@@ -314,7 +322,9 @@ function Invoke-FolderWork {
     [switch]$DoInventory,
     [switch]$DoUpload,
     [string]$InventorySummaryCsv,
-    [string]$UploadSummaryCsv
+    [string]$UploadSummaryCsv,
+    [Nullable[int]]$AzConcurrency,
+    [Nullable[int]]$AzBufferGB
   )
 
   $folderName = Split-Path $Folder -Leaf
@@ -350,6 +360,9 @@ function Invoke-FolderWork {
   }
   if ($PreservePermissions) { $uplArgs.PreservePermissions = $true }
 
+  if ($PSBoundParameters.ContainsKey('AzConcurrency')) { $uplArgs.AzConcurrency = $AzConcurrency }
+    if ($PSBoundParameters.ContainsKey('AzBufferGB'))    { $uplArgs.AzBufferGB    = $AzBufferGB }
+
   & $UploadScript @uplArgs 2>&1 | ForEach-Object { Write-Host $_ }
 }
 
@@ -380,7 +393,9 @@ $common = @{
   DoInventory         = $DoInventory
   DoUpload            = $DoUpload
   InventorySummaryCsv = $InventorySummaryCsv
-    UploadSummaryCsv  = $UploadSummaryCsv
+  UploadSummaryCsv  = $UploadSummaryCsv
+  AzConcurrency       = $AzConcurrency      # <-- NUEVO
+  AzBufferGB          = $AzBufferGB         # <-- NUEVO
 
 }
 
