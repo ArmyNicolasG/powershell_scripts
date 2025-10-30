@@ -53,6 +53,12 @@
 .PARAMETER GenerateStatusReports
   Si se indica, genera CSVs separados por tipo/estado leyendo SOLO los logs nativos.
 
+.PARAMETER AzConcurrency
+  Número de procesos concurrentes para cada llamada del comando AzCopy (opcional PERO IMPORTANTE PARA CARPETAS GRANDES).
+
+.PARAMETER AzBufferGB
+  Tamaño del buffer en GB para cada llamada del comando AzCopy (opcional PERO IMPORTANTE PARA CARPETAS GRANDES).
+
 .PARAMETER UploadSummaryCsv
   Ruta al archivo CSV de resumen de carga centralizado (opcional).
 #>
@@ -214,6 +220,7 @@ try {
   $effBuf  = if ($env:AZCOPY_BUFFER_GB)         { $env:AZCOPY_BUFFER_GB }         else { 'default' }
   Write-Log "AzCopy env -> AZCOPY_CONCURRENCY_VALUE=$effConc, AZCOPY_BUFFER_GB=$effBuf"
 
+ # EJECUCIÓN
   & $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object { Write-Log $_ 'AZCOPY' } | Out-Null
 }
 finally {
@@ -223,10 +230,6 @@ finally {
 
 
 
-# ---------- Ejecución ----------
-$outLines = @()
-& $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object { Write-Log $_ 'AZCOPY' } | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN' }
 
 # ---------- Resumen legible (totales combinados) ----------
 $summary = @{
