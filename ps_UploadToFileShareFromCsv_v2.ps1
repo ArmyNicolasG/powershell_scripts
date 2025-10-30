@@ -206,16 +206,21 @@ Write-Log ("Ejecutando: {0} {1}" -f $az, ($args -join ' '))
 $prevConc = $env:AZCOPY_CONCURRENCY_VALUE
 $prevBuf  = $env:AZCOPY_BUFFER_GB
 try {
-  if ($PSBoundParameters.ContainsKey('AzConcurrency')) { $env:AZCOPY_CONCURRENCY_VALUE = [string]$AzConcurrency }   # p.ej. 12
-  if ($PSBoundParameters.ContainsKey('AzBufferGB'))    { $env:AZCOPY_BUFFER_GB         = [string]$AzBufferGB }      # p.ej. 1
-  $outLines = @()
+  if ($AzConcurrency) { $env:AZCOPY_CONCURRENCY_VALUE = [string]$AzConcurrency }
+  if ($AzBufferGB)    { $env:AZCOPY_BUFFER_GB         = [string]$AzBufferGB   }
+
+  # >>> NUEVO: deja evidencia en el log
+  $effConc = if ($env:AZCOPY_CONCURRENCY_VALUE) { $env:AZCOPY_CONCURRENCY_VALUE } else { 'auto' }
+  $effBuf  = if ($env:AZCOPY_BUFFER_GB)         { $env:AZCOPY_BUFFER_GB }         else { 'default' }
+  Write-Log "AzCopy env -> AZCOPY_CONCURRENCY_VALUE=$effConc, AZCOPY_BUFFER_GB=$effBuf"
+
   & $az @args 2>&1 | Tee-Object -Variable outLines | ForEach-Object { Write-Log $_ 'AZCOPY' } | Out-Null
-  if ($LASTEXITCODE -ne 0) { Write-Log "AzCopy devolvió código $LASTEXITCODE." 'WARN' }
 }
 finally {
-  if ($PSBoundParameters.ContainsKey('AzConcurrency')) { $env:AZCOPY_CONCURRENCY_VALUE = $prevConc }
-  if ($PSBoundParameters.ContainsKey('AzBufferGB'))    { $env:AZCOPY_BUFFER_GB         = $prevBuf  }
+  if ($null -ne $AzConcurrency) { $env:AZCOPY_CONCURRENCY_VALUE = $prevConc }
+  if ($null -ne $AzBufferGB)    { $env:AZCOPY_BUFFER_GB         = $prevBuf  }
 }
+
 
 
 # ---------- Ejecución ----------
