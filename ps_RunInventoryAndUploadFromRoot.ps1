@@ -68,6 +68,9 @@
 .PARAMETER LaunchPollSeconds
   Intervalo de sondeo para el lanzamiento de nuevas ventanas. Default: 10 segundos.
 
+.PARAMETER HoldOnError
+  Si se indica, las ventanas de los procesos fallidos permanecerán abiertas para su revisión.
+
     Limitar a RAM 70% y máx. 3 ventanas:  -OpenNewWindows -RamSafeLimit 70 -MaxOpenWindows 3 -LaunchPollSeconds 10 -WindowLaunchDelaySeconds 15
   Solo control por RAM al 65%, sin tope de ventanas (no recomendado): -OpenNewWindows -RamSafeLimit 65 -MaxOpenWindows 0
   Desactivar control RAM y limitar a 4 ventanas: -OpenNewWindows -RamSafeLimit 0 -MaxOpenWindows 4
@@ -133,7 +136,8 @@ param(
   [Nullable[int]]$AzBufferGB,
   [int]$RamSafeLimit = 70,          # 0 desactiva el check
 [int]$MaxOpenWindows = 0,         # 0 = sin límite
-[int]$LaunchPollSeconds = 10      # cada cuánto reintentar
+[int]$LaunchPollSeconds = 10,      # cada cuánto reintentar
+[switch]$HoldOnError
 
 )
 
@@ -339,29 +343,71 @@ if ($OpenNewWindows) {
 
     # Espera recursos antes de lanzar la siguiente ventana
     Wait-ForResources -LastLaunch $lastLaunch
-
 $cmd = @"
 `$host.UI.RawUI.WindowTitle = '[ORCH:$($script:OrchTag)] $name'
-`$ErrorActionPreference='Continue';
-$(if($DoInventory){
-  "Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ===';
-   & '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'}) -InventorySummaryCsv '$InventorySummaryCsv';
+`$ErrorActionPreference = 'Continue'
+
+# Transcript para capturar toda la consola
+try {
+  `$transDir = '$invLog'
+  if ('$DoUpload' -eq 'True') { `$transDir = '$upLog' }
+  `$transFile = Join-Path `$transDir 'console.txt'
+  try { Start-Transcript -Path `$transFile -Append -Force | Out-Null } catch {}
+
+  Write-Host "=== ($name) INVENTARIO/SUBIDA: $($dir.FullName) ==="
+
+  # INVENTARIO
+  $(if($DoInventory){
+"  try {
+      & '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'}) -InventorySummaryCsv '$InventorySummaryCsv'
+    } catch {
+      Write-Host ('[ERROR] Inventario: ' + `$_.Exception.Message) -ForegroundColor Red
+      `$global:LASTEXITCODE = 1
+    }
+"
+  })
+
+  # SUBIDA
+  $(if($DoUpload){
+"  try {
+      & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv' $(if($PSBoundParameters.ContainsKey('AzConcurrency')){"-AzConcurrency $AzConcurrency"}) $(if($PSBoundParameters.ContainsKey('AzBufferGB')){"-AzBufferGB $AzBufferGB"})
+    } catch {
+      Write-Host ('[ERROR] Subida: ' + `$_.Exception.Message) -ForegroundColor Red
+      `$global:LASTEXITCODE = 1
+    }
+"
+  })
+
+  Write-Host "=== ($name) FINALIZADO ==="
+}
+finally {
+  try { Stop-Transcript | Out-Null } catch {}
+}
+
+# Cierre automático de la ventana.
+# Si quieres mantenerla abierta solo cuando hay error, usa -HoldOnError en el orquestador.
+$(if($HoldOnError){
+"if (`$global:LASTEXITCODE -ne 0) {
+  Write-Host 'Hubo errores. Presiona Enter para cerrar…' -ForegroundColor Yellow
+  try { Read-Host | Out-Null } catch {}
+}
 "
 })
-$(if($DoUpload){
-  "Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
-   & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv' $(if($PSBoundParameters.ContainsKey('AzConcurrency')){"-AzConcurrency $AzConcurrency"}) $(if($PSBoundParameters.ContainsKey('AzBufferGB')){"-AzBufferGB $AzBufferGB"});
-"
-})
-Write-Host '=== ($name) FINALIZADO ===';
+exit `$global:LASTEXITCODE
 "@
+
 
     # EncodedCommand (evita romper dobles espacios)
     $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
 
-    Start-Process -FilePath $pwshExe `
-      -ArgumentList @('-NoLogo','-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand', $enc) `
-      | Out-Null
+Start-Process -FilePath $pwshExe `
+  -ArgumentList @(
+    '-NoLogo',
+    '-NoProfile',
+    '-ExecutionPolicy','Bypass',
+    '-EncodedCommand', $enc
+  ) | Out-Null
+
 
     $lastLaunch = Get-Date
     Info "Ventana lanzada para: $name"
