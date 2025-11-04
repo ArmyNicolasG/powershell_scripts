@@ -59,8 +59,22 @@
 .PARAMETER UploadSummaryCsv
   Si se indica, se generará un CSV de resumen de subida centralizado, sino, se guardará este archivo en el UploadLogRoot.
 
+.PARAMETER RamSafeLimit
+  Límite de RAM seguro en porcentaje (0-100) para el proceso de subida. Default: 70.
+
+.PARAMETER MaxOpenWindows
+  Límite máximo de ventanas abiertas para el proceso de subida. Default: 0 (sin límite).
+
+.PARAMETER LaunchPollSeconds
+  Intervalo de sondeo para el lanzamiento de nuevas ventanas. Default: 10 segundos.
+
+    Limitar a RAM 70% y máx. 3 ventanas:  -OpenNewWindows -RamSafeLimit 70 -MaxOpenWindows 3 -LaunchPollSeconds 10 -WindowLaunchDelaySeconds 15
+  Solo control por RAM al 65%, sin tope de ventanas (no recomendado): -OpenNewWindows -RamSafeLimit 65 -MaxOpenWindows 0
+  Desactivar control RAM y limitar a 4 ventanas: -OpenNewWindows -RamSafeLimit 0 -MaxOpenWindows 4
+
 .OUTPUTS
   Crea <UploadLogRoot>\summary.csv con columnas: Folder, Inv_* y Az_* + Diff/FailedCount.
+
 #>
 
 [CmdletBinding()]
@@ -116,11 +130,16 @@ param(
     [string]$DoOnly,    # Lista ; separada de nombres de carpetas a procesar exclusivamente
   [string]$Exclude,    # Lista ; separada de nombres de carpetas a excluir
   [Nullable[int]]$AzConcurrency,
-  [Nullable[int]]$AzBufferGB
+  [Nullable[int]]$AzBufferGB,
+  [int]$RamSafeLimit = 70,          # 0 desactiva el check
+[int]$MaxOpenWindows = 0,         # 0 = sin límite
+[int]$LaunchPollSeconds = 10      # cada cuánto reintentar
+
 )
 
 
 # ---------------- Helpers ----------------
+
 function Ensure-Dir([string]$p){ if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null } }
 function Sanitize-Name([string]$n){ if ([string]::IsNullOrWhiteSpace($n)) { return 'unnamed' }; $s=($n -replace '[<>:"/\\|?*\x00-\x1F]','_').Trim().TrimEnd('.'); if ($s) { $s } else { 'unnamed' } }
 function Join-UrlPath([string]$a,[string]$b){ $a=$a -replace '\\','/'; if($a -and -not $a.StartsWith('/')){$a='/'+$a}; $b=$b -replace '\\','/'; if($a.EndsWith('/')){$a+$b}else{$a+'/'+$b} }
@@ -137,6 +156,55 @@ function Parse-NameList([string]$s){
   return $set
 }
 
+function Get-RamUsagePercent {
+  # Usa Win32_OperatingSystem (rápido y sin contadores)
+  $os = Get-CimInstance Win32_OperatingSystem
+  if (-not $os) { return 0 }
+  $used = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory)
+  [int][math]::Round(($used / [double]$os.TotalVisibleMemorySize) * 100, 0)
+}
+
+# Etiqueta única por ejecución para identificar las ventanas hijas de ESTE run
+$script:OrchTag = (Get-Date).ToString('yyyyMMddHHmmss') + '-' + ([guid]::NewGuid().ToString('N').Substring(0,6))
+
+function Get-ActiveWindowCount {
+  # Cuenta pwsh con el título que incluye la etiqueta de este orquestador
+  (Get-Process -Name pwsh -ErrorAction SilentlyContinue | Where-Object {
+    $_.MainWindowTitle -like "*[ORCH:$($script:OrchTag)]*"
+  }).Count
+}
+
+function Wait-ForResources {
+  param([datetime]$LastLaunch)
+
+  while ($true) {
+    $mem = Get-RamUsagePercent
+    $win = Get-ActiveWindowCount
+
+    $ramOk  = ($RamSafeLimit -le 0) -or ($mem -lt $RamSafeLimit)
+    $winsOk = ($MaxOpenWindows -le 0) -or ($win -lt $MaxOpenWindows)
+
+    # Respeta el espaciado mínimo entre lanzamientos
+    $needDelay = $false
+    if ($WindowLaunchDelaySeconds -gt 0 -and $LastLaunch) {
+      $elapsed = (New-TimeSpan -Start $LastLaunch -End (Get-Date)).TotalSeconds
+      if ($elapsed -lt $WindowLaunchDelaySeconds) {
+        $needDelay = $true
+        $remain = [int]([math]::Ceiling($WindowLaunchDelaySeconds - $elapsed))
+      }
+    }
+
+    if ($ramOk -and $winsOk -and (-not $needDelay)) { return }
+
+    $why = @()
+    if (-not $ramOk)  { $why += "RAM ${mem}% (límite $RamSafeLimit%)" }
+    if (-not $winsOk) { $why += "ventanas $win/$MaxOpenWindows" }
+    if ($needDelay)   { $why += "delay ${remain}s" }
+    Info ("Hold lanzamiento: {0}. Reintento en {1}s..." -f ($why -join ' | '), $LaunchPollSeconds)
+
+    Start-Sleep -Seconds ([math]::Max(2, $LaunchPollSeconds))
+  }
+}
 
 # --- Validación de intención ---
 if (-not $DoInventory -and -not $DoUpload) {
@@ -261,13 +329,19 @@ Info ("Carpetas a procesar (tras filtros): {0}" -f $folders.Count)
 # ---------------- Modo Ventanas ----------------
 if ($OpenNewWindows) {
   $pwshExe = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source; if (-not $pwshExe) { $pwshExe='pwsh' }
+  $lastLaunch = $null
+
   foreach($dir in $folders){
     $name=$dir.Name; $safe=Sanitize-Name $name
     $invLog=Join-Path $InventoryLogRoot $safe; $upLog=Join-Path $UploadLogRoot $safe
     Ensure-Dir $invLog; Ensure-Dir $upLog
     $destSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
 
+    # Espera recursos antes de lanzar la siguiente ventana
+    Wait-ForResources -LastLaunch $lastLaunch
+
 $cmd = @"
+`$host.UI.RawUI.WindowTitle = '[ORCH:$($script:OrchTag)] $name'
 `$ErrorActionPreference='Continue';
 $(if($DoInventory){
   "Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ===';
@@ -276,36 +350,28 @@ $(if($DoInventory){
 })
 $(if($DoUpload){
   "Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
-   & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv' " +
-   $(if($PSBoundParameters.ContainsKey('AzConcurrency')){ " -AzConcurrency $AzConcurrency" } else { "" }) +
-   $(if($PSBoundParameters.ContainsKey('AzBufferGB'))   { " -AzBufferGB $AzBufferGB"     } else { "" }) +
-   ";
+   & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv' $(if($PSBoundParameters.ContainsKey('AzConcurrency')){"-AzConcurrency $AzConcurrency"}) $(if($PSBoundParameters.ContainsKey('AzBufferGB')){"-AzBufferGB $AzBufferGB"});
 "
 })
-
 Write-Host '=== ($name) FINALIZADO ===';
 "@
 
-# Codificar el script en UTF-16LE 
-$enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
-
-
+    # EncodedCommand (evita romper dobles espacios)
+    $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
 
     Start-Process -FilePath $pwshExe `
-  -ArgumentList @(
-    '-NoLogo',
-    '-NoExit',
-    '-NoProfile',
-    '-ExecutionPolicy','Bypass',
-    '-EncodedCommand', $enc
-  ) | Out-Null
+      -ArgumentList @('-NoLogo','-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand', $enc) `
+      | Out-Null
 
+    $lastLaunch = Get-Date
     Info "Ventana lanzada para: $name"
-    if ($WindowLaunchDelaySeconds -gt 0) { Start-Sleep -Seconds $WindowLaunchDelaySeconds }
+    # Ya no hacemos Sleep fijo aquí; lo controla Wait-ForResources
   }
-  Info "Se lanzaron $($folders.Count) ventanas."
+
+  Info "Se lanzaron $($folders.Count) ventanas (controladas por RAM/ventanas activas)."
   return
 }
+
 
 # ---------------- Función por carpeta (inyectada al paralelo) ----------------
 function Invoke-FolderWork {
