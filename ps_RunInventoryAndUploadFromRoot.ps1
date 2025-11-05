@@ -330,108 +330,94 @@ Info ("Carpetas a procesar (tras filtros): {0}" -f $folders.Count)
 
 # ---------------- Modo Ventanas ----------------
 if ($OpenNewWindows) {
+  # Ejecutable de PowerShell (pwsh si está, sino powershell.exe)
+  $pwshExe = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source
+  if (-not $pwshExe) { $pwshExe = (Get-Command powershell.exe -ErrorAction SilentlyContinue)?.Source }
+  if (-not $pwshExe) { $pwshExe = 'powershell.exe' }
 
-  # 1) Identificador de ejecución (solo diagnóstico visual)
-  $RunId = ([guid]::NewGuid().ToString('N')).Substring(0,8)
-
-  # 2) PIDs lanzados por ESTA ejecución
-  $launchedPids = New-Object System.Collections.Generic.List[int]
-
-  # Helpers locales
-  function Get-SelfAlive {
-    param([int[]]$Pids)
-    $alive = New-Object System.Collections.Generic.List[int]
-    foreach ($pid in $Pids) {
-      try {
-        $p = Get-Process -Id $pid -ErrorAction Stop
-        if (-not $p.HasExited) { $alive.Add($pid) }
-      } catch { } # ya terminó
-    }
-    return $alive
-  }
+  # RunId para aislar esta ejecución de otras paralelas
+  $RunId = [guid]::NewGuid().ToString('N')
 
   function Get-RamUsePct {
-    $os = Get-CimInstance Win32_OperatingSystem
-    $total = [double]$os.TotalVisibleMemorySize
-    $free  = [double]$os.FreePhysicalMemory
-    if ($total -le 0) { return 0 }
-    [math]::Round(100.0 * (1.0 - ($free/$total)))
+    try {
+      $os = Get-CimInstance Win32_OperatingSystem
+      [math]::Round((($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100)
+    } catch { 0 }
   }
 
-  $pwshExe = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source; if (-not $pwshExe) { $pwshExe='pwsh' }
+  function Get-OwnWindowCount {
+    param([string]$RunId)
+    try {
+      # Cuenta solo las ventanas cuyo título contiene este RunId
+      (Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle -like "*RunId=$RunId*" }).Count
+    } catch { 0 }
+  }
 
-  foreach($dir in $folders){
-    $name=$dir.Name; $safe=Sanitize-Name $name
-    $invLog=Join-Path $InventoryLogRoot $safe; $upLog=Join-Path $UploadLogRoot $safe
+  # Normaliza límites
+  $maxOpen = ($WindowMaxOpen -as [int]); if (-not $maxOpen) { $maxOpen = 4 }
+  $poll    = ($LaunchPollSeconds -as [int]); if (-not $poll) { $poll = 10 }
+  $ramLim  = ($RamSafeLimit -as [int]); if (-not $ramLim) { $ramLim = 70 }
+
+  foreach ($dir in $folders) {
+    $name  = $dir.Name
+    $safe  = Sanitize-Name $name
+    $invLog= Join-Path $InventoryLogRoot $safe
+    $upLog = Join-Path $UploadLogRoot     $safe
     Ensure-Dir $invLog; Ensure-Dir $upLog
     $destSub = ($DestBaseSubPath -replace '\\','/').Trim('/')
 
-$cmd = @"
+    # Espera activa hasta que haya RAM/ventanas disponibles
+    while ($true) {
+      $selfActive = Get-OwnWindowCount -RunId $RunId
+      $ramPct     = Get-RamUsePct
+
+      $okWindows = ($maxOpen -le 0) -or ($selfActive -lt $maxOpen)
+      $okRam     = ($ramPct -lt $ramLim)
+
+      if ($okWindows -and $okRam) { break }
+
+      $maxTxt = ($maxOpen -le 0) ? '∞' : $maxOpen
+      Info ("Hold lanzamiento: ventanas {0}/{1} | RAM {2}%/{3}%. Reintento en {4}s..." `
+            -f $selfActive, $maxTxt, $ramPct, $ramLim, $poll)
+      Start-Sleep -Seconds $poll
+    }
+
+    # Comando hijo (sin Add-Type/QuickEdit). TÍTULO incluye RunId para conteo.
+    $cmd = @"
 `$ErrorActionPreference='Continue';
-
-# Título de ventana con RunId
-try { `$host.UI.RawUI.WindowTitle = "MIG|$RunId|$name" } catch {}
-
-# Desactivar QuickEdit/Insert (evitar pausas por clic)
-Add-Type -Namespace Console -Name Native -MemberDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class Native {
-  [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr GetStdHandle(int nStdHandle);
-  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out int lpMode);
-  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode);
-}
-'@;
-`$STD_INPUT = -10;
-`$hIn  = [Console.Native]::GetStdHandle(`$STD_INPUT);
-[int]`$mode = 0;
-if ([Console.Native]::GetConsoleMode(`$hIn, [ref]`$mode)) {
-  `$ENABLE_QUICK_EDIT = 0x40; `$ENABLE_INSERT = 0x20;
-  `$newMode = `$mode -band (-bnot (`$ENABLE_QUICK_EDIT -bor `$ENABLE_INSERT));
-  [Console.Native]::SetConsoleMode(`$hIn, `$newMode) | Out-Null;
-}
-
+`$host.ui.rawui.WindowTitle = '($name) [RunId=$RunId]';
 $(if($DoInventory){
-  "Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ===';
-   & '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'}) -InventorySummaryCsv '$InventorySummaryCsv';
+"Write-Host '=== ($name) INVENTARIO -> $($dir.FullName) ===';
+ & '$InventoryScript' -Path '$($dir.FullName)' -LogDir '$invLog' $(if($ComputeRootSize){'-ComputeRootSize'}) -InventorySummaryCsv '$InventorySummaryCsv';
 "
 })
 $(if($DoUpload){
-  "Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
-   & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv' $(if($AzConcurrency){'-AzConcurrency ' + $AzConcurrency}) $(if($AzBufferGB){'-AzBufferGB ' + $AzBufferGB});
+"Write-Host '=== ($name) SUBIDA -> $($dir.FullName) ===';
+ & '$UploadScript' -SourceRoot '$($dir.FullName)' -StorageAccount '$StorageAccount' -ShareName '$ShareName' -DestSubPath '$destSub' -Sas '$Sas' -ServiceType $ServiceType -Overwrite $Overwrite $(if($PreservePermissions){'-PreservePermissions'}) -AzCopyPath '$AzCopyPath' -LogDir '$upLog' -MaxLogSizeMB $MaxLogSizeMB -UploadSummaryCsv '$UploadSummaryCsv' $(if($AzConcurrency -ne $null){"-AzConcurrency $AzConcurrency"}) $(if($AzBufferGB -ne $null){"-AzBufferGB $AzBufferGB"});
 "
 })
 Write-Host '=== ($name) FINALIZADO ===';
+exit 0
 "@
 
-    # EncodedCommand (UTF-16LE)
+    # Codificar y lanzar SIN -NoExit para cierre automático
     $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
+    $p = Start-Process -FilePath $pwshExe -PassThru -ArgumentList @(
+      '-NoLogo','-NoProfile','-ExecutionPolicy','Bypass',
+      '-WindowStyle','Normal',
+      '-EncodedCommand', $enc
+    )
 
-    # Esperar si se excede el límite propio de ventanas o RAM
-    while ($true) {
-      $launchedPids = Get-SelfAlive -Pids $launchedPids
-      $selfActive   = $launchedPids.Count
-      $ramPct       = Get-RamUsePct
-      $okWindows    = ($selfActive -lt $MaxOpenWindows)
-      $okRam        = ($ramPct -lt $RamSafeLimit)
-      if ($okWindows -and $okRam) { break }
-      Info ("Hold lanzamiento: ventanas {0}/{1} | RAM {2}%/{3}%. Reintento en 10s..." -f $selfActive,$MaxOpenWindows,$ramPct,$RamSafeLimit)
-      Start-Sleep -Seconds 10
-    }
+    Info ("Ventana lanzada para: {0} (PID={1}, RunId={2})" -f $name, $p.Id, $RunId)
 
-    # Lanzar y registrar SOLO el PID de esta ejecución
-    $p = Start-Process -FilePath $pwshExe `
-           -ArgumentList @('-NoLogo','-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand', $enc) `
-           -WindowStyle Minimized -PassThru
-    $launchedPids.Add($p.Id) | Out-Null
-
-    Info "Ventana lanzada para: $name (PID=$($p.Id), RunId=$RunId)"
     if ($WindowLaunchDelaySeconds -gt 0) { Start-Sleep -Seconds $WindowLaunchDelaySeconds }
   }
 
-  Info "Se lanzaron $($launchedPids.Count) ventanas en esta ejecución (RunId=$RunId)."
+  Info "Se lanzaron $($folders.Count) ventanas."
   return
 }
+
 
 
 # ---------------- Función por carpeta (inyectada al paralelo) ----------------
