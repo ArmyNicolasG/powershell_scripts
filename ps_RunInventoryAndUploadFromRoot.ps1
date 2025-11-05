@@ -412,10 +412,10 @@ Write-Host '=== ($name) FINALIZADO ===';
       $launchedPids = Get-SelfAlive -Pids $launchedPids
       $selfActive   = $launchedPids.Count
       $ramPct       = Get-RamUsePct
-      $okWindows    = ($selfActive -lt $WindowMaxOpen)
+      $okWindows    = ($selfActive -lt $MaxOpenWindows)
       $okRam        = ($ramPct -lt $RamSafeLimit)
       if ($okWindows -and $okRam) { break }
-      Info ("Hold lanzamiento: ventanas {0}/{1} | RAM {2}%/{3}%. Reintento en 10s..." -f $selfActive,$WindowMaxOpen,$ramPct,$RamSafeLimit)
+      Info ("Hold lanzamiento: ventanas {0}/{1} | RAM {2}%/{3}%. Reintento en 10s..." -f $selfActive,$MaxOpenWindows,$ramPct,$RamSafeLimit)
       Start-Sleep -Seconds 10
     }
 
