@@ -355,7 +355,7 @@ if ($OpenNewWindows) {
   }
 
   # Normaliza límites
-  $maxOpen = ($WindowMaxOpen -as [int]); if (-not $maxOpen) { $maxOpen = 4 }
+  $maxOpen = ($MaxOpenWindows -as [int]); if (-not $maxOpen) { $maxOpen = 4 }
   $poll    = ($LaunchPollSeconds -as [int]); if (-not $poll) { $poll = 10 }
   $ramLim  = ($RamSafeLimit -as [int]); if (-not $ramLim) { $ramLim = 70 }
 
