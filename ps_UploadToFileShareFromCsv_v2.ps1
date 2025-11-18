@@ -197,6 +197,7 @@ $args = @(
   "--overwrite=$Overwrite",
   '--output-level', $ConsoleOutputLevel,
   '--log-level',    $NativeLogLevel
+  '--cap-mbps', '75'
 )
 if ($IncludePaths -and $IncludePaths.Count -gt 0) {
   $args += @('--include-path', ($IncludePaths -join ';'))
