@@ -348,6 +348,8 @@ if (-not $pwshExe) { $pwshExe = 'powershell.exe' }
 
   # RunId para aislar esta ejecución de otras paralelas
   $RunId = [guid]::NewGuid().ToString('N')
+  $launchedPids = New-Object 'System.Collections.Generic.List[int]'
+
 
   function Get-RamUsePct {
     try {
@@ -357,13 +359,23 @@ if (-not $pwshExe) { $pwshExe = 'powershell.exe' }
   }
 
   function Get-OwnWindowCount {
-    param([string]$RunId)
-    try {
-      # Cuenta solo las ventanas cuyo título contiene este RunId
-      (Get-Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowTitle -like "*RunId=$RunId*" }).Count
-    } catch { 0 }
+  param([System.Collections.Generic.List[int]]$PidList)
+
+  if (-not $PidList) { return 0 }
+
+  $alive = New-Object 'System.Collections.Generic.List[int]'
+  foreach ($pid in $PidList) {
+    if (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
+      [void]$alive.Add([int]$pid)
+    }
   }
+
+  $PidList.Clear()
+  foreach ($pid in $alive) { [void]$PidList.Add([int]$pid) }
+
+  return $PidList.Count
+}
+
 
   # Normaliza límites
   $maxOpen = ($MaxOpenWindows -as [int])
@@ -382,7 +394,8 @@ if ($null -eq $maxOpen) { $maxOpen = 4 }
 
     # Espera activa hasta que haya RAM/ventanas disponibles
     while ($true) {
-      $selfActive = Get-OwnWindowCount -RunId $RunId
+      $selfActive = Get-OwnWindowCount -PidList $launchedPids
+
       $ramPct     = Get-RamUsePct
 
       $okWindows = ($maxOpen -le 0) -or ($selfActive -lt $maxOpen)
@@ -423,6 +436,8 @@ exit 0
       '-WindowStyle','Normal',
       '-EncodedCommand', $enc
     )
+    if ($p -and $p.Id) { [void]$launchedPids.Add([int]$p.Id) }
+
 
     Info ("Ventana lanzada para: {0} (PID={1}, RunId={2})" -f $name, $p.Id, $RunId)
 
