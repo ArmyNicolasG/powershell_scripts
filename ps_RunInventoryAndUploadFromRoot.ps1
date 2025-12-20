@@ -364,17 +364,19 @@ if (-not $pwshExe) { $pwshExe = 'powershell.exe' }
   if (-not $PidList) { return 0 }
 
   $alive = New-Object 'System.Collections.Generic.List[int]'
-  foreach ($pid in $PidList) {
-    if (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
-      [void]$alive.Add([int]$pid)
+
+  foreach ($procId in $PidList) {
+    if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+      [void]$alive.Add([int]$procId)
     }
   }
 
   $PidList.Clear()
-  foreach ($pid in $alive) { [void]$PidList.Add([int]$pid) }
+  foreach ($procId in $alive) { [void]$PidList.Add([int]$procId) }
 
   return $PidList.Count
 }
+
 
 
   # Normaliza límites
