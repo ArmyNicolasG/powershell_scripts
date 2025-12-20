@@ -159,6 +159,11 @@ function Parse-NameList([string]$s){
   }
   return $set
 }
+function Coalesce($value, $fallback) {
+  if ($null -ne $value -and $value -ne '') { return $value }
+  return $fallback
+}
+
 
 function Get-RamUsagePercent {
   # Usa Win32_OperatingSystem (rápido y sin contadores)
@@ -330,10 +335,16 @@ Info ("Carpetas a procesar (tras filtros): {0}" -f $folders.Count)
 
 # ---------------- Modo Ventanas ----------------
 if ($OpenNewWindows) {
-  # Ejecutable de PowerShell (pwsh si está, sino powershell.exe)
-  $pwshExe = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source
-  if (-not $pwshExe) { $pwshExe = (Get-Command powershell.exe -ErrorAction SilentlyContinue)?.Source }
-  if (-not $pwshExe) { $pwshExe = 'powershell.exe' }
+  $cmdPwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+$pwshExe = $null
+if ($cmdPwsh) { $pwshExe = $cmdPwsh.Source }
+
+if (-not $pwshExe) {
+  $cmdWinPS = Get-Command powershell.exe -ErrorAction SilentlyContinue
+  if ($cmdWinPS) { $pwshExe = $cmdWinPS.Source }
+}
+if (-not $pwshExe) { $pwshExe = 'powershell.exe' }
+
 
   # RunId para aislar esta ejecución de otras paralelas
   $RunId = [guid]::NewGuid().ToString('N')
@@ -355,7 +366,9 @@ if ($OpenNewWindows) {
   }
 
   # Normaliza límites
-  $maxOpen = ($WindowMaxOpen -as [int]); if (-not $maxOpen) { $maxOpen = 4 }
+  $maxOpen = ($MaxOpenWindows -as [int])
+if ($null -eq $maxOpen) { $maxOpen = 4 }
+
   $poll    = ($LaunchPollSeconds -as [int]); if (-not $poll) { $poll = 10 }
   $ramLim  = ($RamSafeLimit -as [int]); if (-not $ramLim) { $ramLim = 70 }
 
@@ -377,7 +390,9 @@ if ($OpenNewWindows) {
 
       if ($okWindows -and $okRam) { break }
 
-      $maxTxt = ($maxOpen -le 0) ? '∞' : $maxOpen
+      $maxTxt = $maxOpen
+if ($maxOpen -le 0) { $maxTxt = '∞' }
+
       Info ("Hold lanzamiento: ventanas {0}/{1} | RAM {2}%/{3}%. Reintento en {4}s..." `
             -f $selfActive, $maxTxt, $ramPct, $ramLim, $poll)
       Start-Sleep -Seconds $poll
@@ -550,8 +565,13 @@ function Parse-FolderInfo([string]$folderLogDir){
 }
 function Get-LatestUploadLog([string]$uploadFolder){
   if (-not (Test-Path -LiteralPath $uploadFolder)) { return $null }
-  (Get-ChildItem -LiteralPath $uploadFolder -File -Filter 'upload-logs-*.txt' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)?.FullName
+  $latest = Get-ChildItem -LiteralPath $uploadFolder -File -Filter 'upload-logs-*.txt' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+  if ($latest) { return $latest.FullName }
+  return $null
 }
+
 function Parse-AzCopySummary([string]$logPath){
   if (-not $logPath -or -not (Test-Path -LiteralPath $logPath)) { return @{} }
   $h=@{}; $lines = Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue
@@ -629,22 +649,23 @@ foreach($dir in $folders){
 
   $summaryRows.Add([pscustomobject]@{
     Folder                 = $name
-    Inv_TotalFolders       = ($inv['TotalFolders'] ?? '')
-    Inv_TotalFiles         = ($inv['TotalFiles'] ?? '')
-    Inv_AccessibleFolders  = ($inv['AccessibleFolders'] ?? '')
-    Inv_AccessibleFiles    = ($inv['AccessibleFiles'] ?? '')
-    Inv_InaccessibleFiles  = ($inv['InaccessibleFiles'] ?? '')
-    Inv_RenamedFolders     = ($inv['RenamedOrInvalidFolders'] ?? '')
-    Inv_RenamedFiles       = ($inv['RenamedOrInvalidFiles'] ?? '')
-    Inv_TotalBytes         = ($inv['TotalBytes'] ?? '')
-    Az_Status              = ($az['Az_Status'] ?? '')
-    Az_Total               = ($az['Az_Total'] ?? '')
-    Az_Completed           = ($az['Az_Completed'] ?? '')
-    Az_Failed              = ($az['Az_Failed'] ?? '')
-    Az_Skipped             = ($az['Az_Skipped'] ?? '')
-    Az_Bytes               = ($az['Az_Bytes'] ?? '')
-    Az_DurationSec         = ($az['Az_DurationSec'] ?? '')
-    Az_JobID               = ($az['Az_JobID'] ?? '')
+    Inv_TotalFiles         = (Coalesce $inv['TotalFiles'] '')
+Inv_AccessibleFolders  = (Coalesce $inv['AccessibleFolders'] '')
+Inv_AccessibleFiles    = (Coalesce $inv['AccessibleFiles'] '')
+Inv_InaccessibleFiles  = (Coalesce $inv['InaccessibleFiles'] '')
+Inv_RenamedFolders     = (Coalesce $inv['RenamedOrInvalidFolders'] '')
+Inv_RenamedFiles       = (Coalesce $inv['RenamedOrInvalidFiles'] '')
+Inv_TotalBytes         = (Coalesce $inv['TotalBytes'] '')
+
+Az_Status              = (Coalesce $az['Az_Status'] '')
+Az_Total               = (Coalesce $az['Az_Total'] '')
+Az_Completed           = (Coalesce $az['Az_Completed'] '')
+Az_Failed              = (Coalesce $az['Az_Failed'] '')
+Az_Skipped             = (Coalesce $az['Az_Skipped'] '')
+Az_Bytes               = (Coalesce $az['Az_Bytes'] '')
+Az_DurationSec         = (Coalesce $az['Az_DurationSec'] '')
+Az_JobID               = (Coalesce $az['Az_JobID'] '')
+
     FailedCount            = $failedCount
     Diff_MissingCount      = $diff.Missing
     Diff_ExtraCount        = $diff.Extra
