@@ -8,7 +8,8 @@ Editar variables en la sección Configuracion.
 param(
   [string] $SyncScriptPath = "C:\Source\scripts\ps_SyncAzureFiles.ps1",
   [string] $AzCopyPath     = "C:\Source\scripts\azcopy.exe",
-  [string] $Sas            = "sv=...&sig=...",
+  [string] $SasNas1        = "",
+  [string] $SasNas2        = "",
   [string] $LogRoot        = "C:\Source\logs\sync",
   [int]    $MaxOpenWindows = 3,
   [int]    $AzConcurrency  = 16,
@@ -17,6 +18,35 @@ param(
 
 function Ensure-Dir([string]$p) {
   if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+}
+
+function Read-RequiredValue {
+  param(
+    [Parameter(Mandatory)] [string] $Prompt,
+    [string] $CurrentValue
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($CurrentValue)) { return $CurrentValue.Trim() }
+
+  while ($true) {
+    $inputValue = Read-Host $Prompt
+    if (-not [string]::IsNullOrWhiteSpace($inputValue)) { return $inputValue.Trim() }
+    Write-Host "Valor requerido. Intenta nuevamente."
+  }
+}
+
+function Get-SasForStorageAccount {
+  param([Parameter(Mandatory)] [string] $StorageAccount)
+
+  $account = $StorageAccount.Trim().ToLowerInvariant()
+  if ($account -match "nas1") {
+    return [pscustomobject]@{ Token = $SasNas1; Label = "NAS1" }
+  }
+  if ($account -match "nas2") {
+    return [pscustomobject]@{ Token = $SasNas2; Label = "NAS2" }
+  }
+
+  throw "No se pudo determinar el SAS para StorageAccount '$StorageAccount'. Debe contener 'nas1' o 'nas2'."
 }
 
 function Run-Sync {
@@ -32,6 +62,8 @@ function Run-Sync {
     [switch] $PreservePermissions
   )
 
+  $sasSelection = Get-SasForStorageAccount -StorageAccount $StorageAccount
+
   $args = @(
     $SyncScriptPath,
     "-OpenNewWindows",
@@ -39,7 +71,7 @@ function Run-Sync {
     "-StorageAccount", $StorageAccount,
     "-ShareName", $ShareName,
     "-DestBaseSubPath", $DestBaseSubPath,
-    "-Sas", $Sas,
+    "-Sas", $sasSelection.Token,
     "-AzCopyPath", $AzCopyPath,
     "-LogFile", $LogFile,
     "-MaxOpenWindows", $MaxOpenWindows,
@@ -55,6 +87,7 @@ function Run-Sync {
   Write-Host "== Ejecutando =="
   Write-Host ("SourceRoot: {0}" -f $SourceRoot)
   Write-Host ("Destino:    {0} / {1} / {2}" -f $StorageAccount, $ShareName, $DestBaseSubPath)
+  Write-Host ("SAS usado:  {0}" -f $sasSelection.Label)
   if ($DoOnly) { Write-Host ("DoOnly:     {0}" -f $DoOnly) }
   if ($Exclude) { Write-Host ("Exclude:    {0}" -f $Exclude) }
   Write-Host ("LogFile:    {0}" -f $LogFile)
@@ -66,6 +99,8 @@ function Run-Sync {
 }
 
 Ensure-Dir $LogRoot
+$SasNas1 = Read-RequiredValue -Prompt "Ingresa el token SAS para NAS1 (storagefonvalmednas1)" -CurrentValue $SasNas1
+$SasNas2 = Read-RequiredValue -Prompt "Ingresa el token SAS para NAS2 (storagefonvalmednas2)" -CurrentValue $SasNas2
 
 # NAS2
 Ensure-Dir (Join-Path $LogRoot "nas2-archivo-central")
