@@ -43,6 +43,8 @@ function Escape-SingleQuotes([string]$s) {
 }
 
 function Ensure-Dir([string]$p) {
+  # crea carpeta si falta
+  if ([string]::IsNullOrWhiteSpace($p)) { return }
   if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
 
@@ -78,13 +80,30 @@ function Get-AliveCount {
   param([System.Collections.Generic.List[int]]$PidList)
 
   if (-not $PidList) { return 0 }
+
   $alive = New-Object 'System.Collections.Generic.List[int]'
-  foreach ($pid in $PidList) {
-    if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { [void]$alive.Add([int]$pid) }
+  foreach ($procId in $PidList) {
+    if (Get-Process -Id $procId -ErrorAction SilentlyContinue) { [void]$alive.Add([int]$procId) }
   }
+
   $PidList.Clear()
-  foreach ($pid in $alive) { [void]$PidList.Add([int]$pid) }
+  foreach ($procId in $alive) { [void]$PidList.Add([int]$procId) }
   $PidList.Count
+}
+
+function Get-StampedLogFolder {
+  param([Parameter(Mandatory)][string]$InputLogFile)
+
+  $parent = Split-Path -Path $InputLogFile -Parent
+  if ([string]::IsNullOrWhiteSpace($parent)) { $parent = "." }
+
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+
+  if ($parent -eq ".") {
+    return (Join-Path "." ("logs-" + $stamp))
+  }
+
+  return ($parent.TrimEnd("\") + "-" + $stamp)
 }
 
 function Invoke-SyncWorker {
@@ -128,7 +147,10 @@ function Invoke-SyncWorker {
       $args += @("--preserve-smb-permissions=true","--preserve-smb-info=true")
     }
 
-    Ensure-Dir (Split-Path -Path $WorkerLogFile -Parent)
+    $lp = Split-Path -Path $WorkerLogFile -Parent
+    if ([string]::IsNullOrWhiteSpace($lp)) { $lp = "." }
+    Ensure-Dir $lp
+
     & $AzCopyPath @args 2>&1 | Tee-Object -FilePath $WorkerLogFile | Out-Null
     return $LASTEXITCODE
   }
@@ -143,6 +165,16 @@ $exclSet = Parse-NameList $Exclude
 
 $srcRootResolved = (Resolve-Path -LiteralPath $SourceRoot).Path
 
+# carpeta de logs con timestamp
+$logLeaf = Split-Path -Path $LogFile -Leaf
+if ([string]::IsNullOrWhiteSpace($logLeaf)) { $logLeaf = "azcopy-sync.log" }
+
+$stampedFolder = Get-StampedLogFolder -InputLogFile $LogFile
+Ensure-Dir $stampedFolder
+
+$LogFile = Join-Path $stampedFolder $logLeaf
+$logParent = $stampedFolder
+
 # modo directo
 if (-not $OpenNewWindows) {
   $code = Invoke-SyncWorker -WorkerSourcePath $srcRootResolved -WorkerDestBaseSubPath $DestBaseSubPath -WorkerLogFile $LogFile
@@ -151,10 +183,6 @@ if (-not $OpenNewWindows) {
 
 # modo orquestador
 $pwshExe = Get-PwshExe
-
-$logParent = Split-Path -Path $LogFile -Parent
-if ([string]::IsNullOrWhiteSpace($logParent)) { $logParent = "." }
-Ensure-Dir $logParent
 
 $rootDirs = Get-ChildItem -LiteralPath $srcRootResolved -Directory -Force
 
