@@ -14,6 +14,7 @@
 
 .PARAMETER DestSubPath
   Subcarpeta/ruta destino dentro del share o contenedor (con o sin '/' inicial).
+  Si se pasa vacio, el destino sera la raiz del share o contenedor.
 
 .PARAMETER Sas
   Token SAS (con o sin '?').
@@ -68,7 +69,7 @@ param(
   [Parameter(Mandatory)][string]$SourceRoot,
   [Parameter(Mandatory)][string]$StorageAccount,
   [Parameter(Mandatory)][string]$ShareName,
-  [Parameter(Mandatory)][string]$DestSubPath,
+  [Parameter(Mandatory)][AllowEmptyString()][string]$DestSubPath,
   [Parameter(Mandatory)][string]$Sas,
 
   [ValidateSet('FileShare','Blob')][string]$ServiceType = 'FileShare',

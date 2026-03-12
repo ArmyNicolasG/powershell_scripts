@@ -186,7 +186,7 @@ Subir una carpeta local o UNC a Azure File Share o Azure Blob usando `azcopy cop
 | `SourceRoot` | `string` | n/a | Carpeta origen. Obligatorio. |
 | `StorageAccount` | `string` | n/a | Nombre de la storage account. Obligatorio. |
 | `ShareName` | `string` | n/a | File share o contenedor. Obligatorio. |
-| `DestSubPath` | `string` | n/a | Ruta interna destino dentro del share o contenedor. Obligatorio. |
+| `DestSubPath` | `string` | n/a | Ruta interna destino dentro del share o contenedor. Puede ser vacia para usar la raiz del share o contenedor. |
 | `Sas` | `string` | n/a | Token SAS. Obligatorio. |
 | `ServiceType` | `string` | `FileShare` | `FileShare` o `Blob`. |
 | `Overwrite` | `string` | `ifSourceNewer` | Politica de sobreescritura. |
