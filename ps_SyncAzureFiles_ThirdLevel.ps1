@@ -184,27 +184,34 @@ function Get-ThirdLevelWorkItems {
   )
 
   $items = New-Object System.Collections.Generic.List[object]
+  Write-Info ("Enumerando carpetas de segundo nivel en '{0}'..." -f $ResolvedSourceRoot)
   $secondLevelDirs = @(Get-ChildItem -LiteralPath $ResolvedSourceRoot -Directory -Force -ErrorAction SilentlyContinue)
+  Write-Info ("Segundo nivel detectado antes de filtros: {0}" -f $secondLevelDirs.Count)
 
   if ($OnlySet -and $OnlySet.Count -gt 0) {
     $secondLevelDirs = $secondLevelDirs | Where-Object { $OnlySet.Contains($_.Name) }
+    Write-Info ("Aplicado DoOnly. Segundo nivel restante: {0}" -f @($secondLevelDirs).Count)
   }
   if ($ExcludeSet -and $ExcludeSet.Count -gt 0) {
     $secondLevelDirs = $secondLevelDirs | Where-Object { -not $ExcludeSet.Contains($_.Name) }
+    Write-Info ("Aplicado Exclude. Segundo nivel restante: {0}" -f @($secondLevelDirs).Count)
   }
 
   foreach ($secondDir in $secondLevelDirs) {
+    Write-Info ("Revisando segundo nivel '{0}'..." -f $secondDir.Name)
     $thirdLevelDirs = @(Get-ChildItem -LiteralPath $secondDir.FullName -Directory -Force -ErrorAction SilentlyContinue)
+    Write-Info ("'{0}' tiene {1} subcarpetas directas." -f $secondDir.Name, $thirdLevelDirs.Count)
 
     if ($thirdLevelDirs.Count -eq 0) {
       if ($AllowSecondLevelFallback) {
-        Write-Info ("Fallback a segundo nivel para '{0}': no tiene carpetas de tercer nivel." -f $secondDir.Name)
+        $fallbackDest = Build-SecondLevelDestSubPath -BaseSubPath $DestBaseSubPath -SecondLevelName $secondDir.Name
+        Write-Info ("Fallback a segundo nivel para '{0}': no tiene carpetas de tercer nivel. Destino='{1}'." -f $secondDir.Name, $fallbackDest)
         $items.Add([pscustomobject]@{
           WorkLevel       = "SecondLevel"
           SecondLevelName = $secondDir.Name
           ThirdLevelName  = $null
           SourcePath      = $secondDir.FullName
-          DestSubPath     = (Build-SecondLevelDestSubPath -BaseSubPath $DestBaseSubPath -SecondLevelName $secondDir.Name)
+          DestSubPath     = $fallbackDest
         }) | Out-Null
       } else {
         Write-Info ("Omitiendo '{0}': no tiene carpetas de tercer nivel." -f $secondDir.Name)
@@ -213,16 +220,19 @@ function Get-ThirdLevelWorkItems {
     }
 
     foreach ($thirdDir in $thirdLevelDirs) {
+      $destSub = Build-ThirdLevelDestSubPath -BaseSubPath $DestBaseSubPath -SecondLevelName $secondDir.Name -ThirdLevelName $thirdDir.Name
+      Write-Info ("Unidad detectada: '{0}' / '{1}' -> '{2}'." -f $secondDir.Name, $thirdDir.Name, $destSub)
       $items.Add([pscustomobject]@{
         WorkLevel       = "ThirdLevel"
         SecondLevelName = $secondDir.Name
         ThirdLevelName  = $thirdDir.Name
         SourcePath      = $thirdDir.FullName
-        DestSubPath     = (Build-ThirdLevelDestSubPath -BaseSubPath $DestBaseSubPath -SecondLevelName $secondDir.Name -ThirdLevelName $thirdDir.Name)
+        DestSubPath     = $destSub
       }) | Out-Null
     }
   }
 
+  Write-Info ("Enumeracion finalizada. Unidades acumuladas: {0}" -f $items.Count)
   $items
 }
 
@@ -295,7 +305,9 @@ if (-not $OpenNewWindows) {
   exit $code
 }
 
+Write-Info "Resolviendo pwsh para modo ventanas..."
 $pwshExe = Get-PwshExe
+Write-Info ("pwsh detectado en '{0}'." -f $pwshExe)
 $workItems = @(Get-ThirdLevelWorkItems -ResolvedSourceRoot $srcRootResolved -OnlySet $onlySet -ExcludeSet $exclSet -AllowSecondLevelFallback:$FallbackToSecondLevel)
 
 if ($workItems.Count -eq 0) {
@@ -316,6 +328,7 @@ foreach ($item in $workItems) {
     $okRam = ($RamSafeLimit -le 0) -or ($ramPct -lt $RamSafeLimit)
 
     if ($okWindows -and $okRam) { break }
+    Write-Info ("Esperando recursos para lanzar siguiente unidad. Ventanas activas={0}, RAM={1}%, MaxOpenWindows={2}, RamSafeLimit={3}%." -f $active, $ramPct, $MaxOpenWindows, $RamSafeLimit)
     Start-Sleep -Seconds ([math]::Max(2, $LaunchPollSeconds))
   }
 
