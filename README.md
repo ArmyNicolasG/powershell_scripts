@@ -23,6 +23,7 @@ Objetivos cubiertos por estos scripts:
 | `ps_UploadToFileShareFromCsv_v2.ps1` | Subida inicial | Ejecutar `azcopy copy` a Azure Files o Blob | Cuando necesitas cargar una carpeta puntual | Logs de subida y `resumen-subidas.csv` |
 | `ps_RunInventoryAndUploadFromRoot.ps1` | Orquestador | Ejecutar inventario y/o subida por cada subcarpeta inmediata | Cuando migras una raiz con muchas carpetas | Logs por carpeta y `summary.csv` consolidado |
 | `ps_SyncAzureFiles.ps1` | Sync incremental | Ejecutar `azcopy sync` sin borrar destino | Cuando ya hiciste carga inicial y quieres mantener cambios | Logs de sync por corrida o por carpeta |
+| `ps_SyncAzureFiles_ThirdLevel.ps1` | Sync incremental profundo | Ejecutar `azcopy sync` por cada carpeta de tercer nivel | Cuando unas pocas carpetas de segundo nivel concentran mucho peso y necesitas aislar mas el trabajo | Logs de sync por cada carpeta de tercer nivel |
 | `Run_All_Syncs_Fonvalmed.ps1` | Runner especifico | Lanzar multiples syncs preconfigurados | Solo para el caso Fonvalmed o como plantilla de automatizacion | Una corrida completa con varios destinos |
 | `ps_FixDuplicatedSubFolders.ps1` | Correctivo | Reparar estructuras `Carpeta\Carpeta` | Despues de detectar duplicacion de subcarpetas | Reubicacion del contenido al nivel correcto |
 
@@ -46,8 +47,9 @@ Orden recomendado:
 2. Si vas a procesar una raiz con muchas subcarpetas, usar `ps_RunInventoryAndUploadFromRoot.ps1` como script principal de operacion.
 3. Si solo necesitas cargar una carpeta puntual, usar `ps_UploadToFileShareFromCsv_v2.ps1`.
 4. Despues de la carga inicial, usar `ps_SyncAzureFiles.ps1` para sincronizaciones incrementales.
-5. Si el proyecto corresponde al lote Fonvalmed ya parametrizado, usar `Run_All_Syncs_Fonvalmed.ps1`.
-6. Si despues de migrar aparece una estructura duplicada tipo `Carpeta\Carpeta`, revisar primero con `ps_FixDuplicatedSubFolders.ps1` en modo `-WhatIf`.
+5. Si necesitas abrir mas granularidad porque el peso esta concentrado en pocas ramas profundas, usar `ps_SyncAzureFiles_ThirdLevel.ps1`.
+6. Si el proyecto corresponde al lote Fonvalmed ya parametrizado, usar `Run_All_Syncs_Fonvalmed.ps1`.
+7. Si despues de migrar aparece una estructura duplicada tipo `Carpeta\Carpeta`, revisar primero con `ps_FixDuplicatedSubFolders.ps1` en modo `-WhatIf`.
 
 Notas:
 - `ps_RunInventoryAndUploadFromRoot.ps1` puede ejecutar solo inventario, solo subida o ambos.
@@ -67,10 +69,13 @@ Usa `ps_RunInventoryAndUploadFromRoot.ps1`.
 ### Escenario 4: mantener sincronizado despues de la carga inicial
 Usa `ps_SyncAzureFiles.ps1`.
 
-### Escenario 5: ejecutar un lote ya definido para Fonvalmed
+### Escenario 5: mantener sincronizado por carpetas de tercer nivel
+Usa `ps_SyncAzureFiles_ThirdLevel.ps1`.
+
+### Escenario 6: ejecutar un lote ya definido para Fonvalmed
 Usa `Run_All_Syncs_Fonvalmed.ps1`.
 
-### Escenario 6: corregir duplicacion de carpetas en destino
+### Escenario 7: corregir duplicacion de carpetas en destino
 Usa `ps_FixDuplicatedSubFolders.ps1`.
 
 ## Interfaces publicas y convenciones
@@ -459,6 +464,76 @@ Sincronizar cambios incrementales con `azcopy sync` desde una carpeta origen hac
 - Este script usa `sync`, no `copy`.
 - `--delete-destination=false` evita borrados en destino; si necesitas otro comportamiento, este script no lo implementa.
 - En modo ventanas, la unidad de trabajo es cada subcarpeta inmediata de `SourceRoot`.
+
+---
+
+## `ps_SyncAzureFiles_ThirdLevel.ps1`
+
+### Objetivo
+Sincronizar cambios incrementales con `azcopy sync` lanzando una unidad de trabajo por cada carpeta de tercer nivel bajo una raiz.
+
+### Cuando usarlo
+- cuando unas pocas carpetas de segundo nivel contienen la mayor parte del volumen
+- cuando necesitas mas aislamiento que el script de sync normal
+- cuando quieres mantener la jerarquia `SegundoNivel/TercerNivel` en el destino
+
+### Que hace internamente
+- enumera carpetas de segundo nivel desde `SourceRoot`
+- aplica `DoOnly` y `Exclude` por nombre exacto de segundo nivel
+- dentro de cada carpeta de segundo nivel, enumera sus carpetas de tercer nivel
+- lanza una ventana o proceso por cada carpeta de tercer nivel
+- construye el destino conservando `SegundoNivel/TercerNivel`
+- usa `--delete-destination=false`, asi que no elimina contenido existente en destino
+
+### Parametros
+Usa la misma interfaz publica que `ps_SyncAzureFiles.ps1`:
+- `SourceRoot`
+- `StorageAccount`
+- `ShareName`
+- `DestBaseSubPath`
+- `Sas`
+- `AzCopyPath`
+- `LogFile`
+- `PreservePermissions`
+- `AzConcurrency`
+- `AzBufferGB`
+- `OpenNewWindows`
+- `MaxOpenWindows`
+- `LaunchPollSeconds`
+- `WindowLaunchDelaySeconds`
+- `RamSafeLimit`
+- `DoOnly`
+- `Exclude`
+- `HoldOnError`
+
+### Comportamiento clave
+- si `DestBaseSubPath = ""`, una carpeta local `Segundo\Tercero` termina en `share/Segundo/Tercero`
+- si `DestBaseSubPath = "base"`, esa carpeta termina en `share/base/Segundo/Tercero`
+- si una carpeta de segundo nivel no tiene carpetas de tercer nivel, se omite y se reporta
+- los nombres se sanean solo para el nombre del log, no para origen ni destino
+
+### Archivos y logs que genera
+- una carpeta de corrida con timestamp derivada de `LogFile`
+- un log por unidad de trabajo, con formato `sync-<segundo>--<tercero>.log`
+
+### Ejemplo de uso
+```powershell
+.\ps_SyncAzureFiles_ThirdLevel.ps1 `
+  -SourceRoot "\\10.1.1.32\14. Fotos e inventarios Servicios Marinos" `
+  -StorageAccount "ofimaticacontent" `
+  -ShareName "servma" `
+  -DestBaseSubPath "" `
+  -Sas "?sv=..." `
+  -AzCopyPath "C:\source\scripts\azcopy.exe" `
+  -OpenNewWindows `
+  -MaxOpenWindows 2 `
+  -LogFile "C:\source\upload\ServiciosMarinos-thirdlevel\sync.log"
+```
+
+### Riesgos y advertencias
+- este script no filtra por tercer nivel en esta primera version
+- si lo ejecutas sin `-OpenNewWindows`, hace un sync directo de toda la raiz
+- al abrir muchas ventanas, conviene limitar `MaxOpenWindows` y `RamSafeLimit`
 
 ---
 
