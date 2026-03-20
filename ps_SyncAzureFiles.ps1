@@ -3,7 +3,7 @@ param(
   [Parameter(Mandatory)] [string] $SourceRoot,
   [Parameter(Mandatory)] [string] $StorageAccount,
   [Parameter(Mandatory)] [string] $ShareName,
-  [Parameter(Mandatory)] [string] $DestBaseSubPath,
+  [Parameter(Mandatory)] [AllowEmptyString()] [string] $DestBaseSubPath,
   [Parameter(Mandatory)] [string] $Sas,
 
   [string] $AzCopyPath = "azcopy",
@@ -35,6 +35,46 @@ function Normalize-Sas([string]$s) {
 function Normalize-SubPath([string]$p) {
   $t = ($p -replace "\\","/").Trim()
   $t.Trim("/")
+}
+
+function Get-DestSubPath {
+  param(
+    [AllowEmptyString()] [string]$BaseSubPath,
+    [Parameter(Mandatory)] [string]$SourcePath,
+    [switch]$AppendLeafWhenBaseEmpty
+  )
+
+  $base = Normalize-SubPath $BaseSubPath
+  $leaf = Split-Path $SourcePath -Leaf
+
+  if ([string]::IsNullOrWhiteSpace($base)) {
+    if ($AppendLeafWhenBaseEmpty) { return $leaf }
+    return ""
+  }
+
+  $last = $base.Split("/")[-1]
+  if ($last -eq $leaf) { return $base }
+
+  return ($base + "/" + $leaf).Trim("/")
+}
+
+function Build-FileShareDestUrl {
+  param(
+    [Parameter(Mandatory)] [string]$Account,
+    [Parameter(Mandatory)] [string]$Share,
+    [AllowEmptyString()] [string]$DestSubPath,
+    [Parameter(Mandatory)] [string]$SasToken
+  )
+
+  $sasT = Normalize-Sas $SasToken
+  $destSub = Normalize-SubPath $DestSubPath
+  $baseUrl = "https://$Account.file.core.windows.net/$Share"
+
+  if ([string]::IsNullOrWhiteSpace($destSub)) {
+    return "$baseUrl$sasT"
+  }
+
+  return "$baseUrl/$destSub$sasT"
 }
 
 function Escape-SingleQuotes([string]$s) {
@@ -109,25 +149,13 @@ function Get-StampedLogFolder {
 function Invoke-SyncWorker {
   param(
     [Parameter(Mandatory)] [string] $WorkerSourcePath,
-    [Parameter(Mandatory)] [string] $WorkerDestBaseSubPath,
+    [Parameter(Mandatory)] [AllowEmptyString()] [string] $WorkerDestBaseSubPath,
     [Parameter(Mandatory)] [string] $WorkerLogFile
   )
 
   $src  = (Resolve-Path -LiteralPath $WorkerSourcePath).Path
-  $leaf = Split-Path $src -Leaf
-
-  $base = Normalize-SubPath $WorkerDestBaseSubPath
-
-  $destSub = $base
-  if ([string]::IsNullOrWhiteSpace($destSub)) {
-    $destSub = $leaf
-  } else {
-    $last = $destSub.Split("/")[-1]
-    if ($last -ne $leaf) { $destSub = ($destSub + "/" + $leaf).Trim("/") }
-  }
-
-  $sasT = Normalize-Sas $Sas
-  $destUrl = "https://$StorageAccount.file.core.windows.net/$ShareName/$destSub$sasT"
+  $destSub = Get-DestSubPath -BaseSubPath $WorkerDestBaseSubPath -SourcePath $src
+  $destUrl = Build-FileShareDestUrl -Account $StorageAccount -Share $ShareName -DestSubPath $destSub -SasToken $Sas
 
   $prevConc = $env:AZCOPY_CONCURRENCY_VALUE
   $prevBuf  = $env:AZCOPY_BUFFER_GB
@@ -238,23 +266,38 @@ foreach ($dir in $rootDirs) {
 
 function Normalize-SubPath([string]`$p){ (`$p -replace '\\','/').Trim().Trim('/') }
 function Normalize-Sas([string]`$s){ if (`$s.Trim().StartsWith('?')) { `$s.Trim() } else { '?' + `$s.Trim() } }
+function Get-DestSubPath([string]`$baseSubPath, [string]`$sourcePath, [bool]`$appendLeafWhenBaseEmpty) {
+  `$base = Normalize-SubPath `$baseSubPath;
+  `$leaf = Split-Path `$sourcePath -Leaf;
+
+  if ([string]::IsNullOrWhiteSpace(`$base)) {
+    if (`$appendLeafWhenBaseEmpty) { return `$leaf }
+    return '';
+  }
+
+  `$last = `$base.Split('/')[-1];
+  if (`$last -eq `$leaf) { return `$base }
+
+  return (`$base + '/' + `$leaf).Trim('/');
+}
+function Build-FileShareDestUrl([string]`$account, [string]`$share, [string]`$destSubPath, [string]`$sasToken) {
+  `$sasT = Normalize-Sas `$sasToken;
+  `$destSub = Normalize-SubPath `$destSubPath;
+  `$baseUrl = 'https://' + `$account + '.file.core.windows.net/' + `$share;
+
+  if ([string]::IsNullOrWhiteSpace(`$destSub)) {
+    return `$baseUrl + `$sasT;
+  }
+
+  return `$baseUrl + '/' + `$destSub + `$sasT;
+}
 
 `$env:AZCOPY_CONCURRENCY_VALUE = '$AzConcurrency';
 `$env:AZCOPY_BUFFER_GB = '$AzBufferGB';
 
 `$src = '$srcEsc';
-`$leaf = Split-Path `$src -Leaf;
-`$base = Normalize-SubPath '$baseEsc';
-
-`$destSub = `$base;
-if ([string]::IsNullOrWhiteSpace(`$destSub)) {
-  `$destSub = `$leaf;
-} else {
-  `$last = `$destSub.Split('/')[-1];
-  if (`$last -ne `$leaf) { `$destSub = (`$destSub + '/' + `$leaf).Trim('/') }
-}
-
-`$destUrl = 'https://$accEsc.file.core.windows.net/$shareEsc/' + `$destSub + (Normalize-Sas '$sasEsc');
+`$destSub = Get-DestSubPath '$baseEsc' `$src `$true;
+`$destUrl = Build-FileShareDestUrl '$accEsc' '$shareEsc' `$destSub '$sasEsc';
 
 Write-Host '=== SYNC INICIO ===';
 Write-Host "Origen:  `$src";
