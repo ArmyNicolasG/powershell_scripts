@@ -22,6 +22,7 @@ param(
 
   [string] $DoOnly,
   [string] $Exclude,
+  [switch] $FallbackToSecondLevel,
 
   [switch] $HoldOnError
 )
@@ -47,8 +48,21 @@ function Ensure-Dir([string]$p) {
   if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
 
+function Write-LogLine([string]$message) {
+  $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $message
+  Write-Host $line
+
+  if ($script:MasterLogPath) {
+    try {
+      $parent = Split-Path -Path $script:MasterLogPath -Parent
+      if (-not [string]::IsNullOrWhiteSpace($parent)) { Ensure-Dir $parent }
+      $line | Out-File -LiteralPath $script:MasterLogPath -Append -Encoding utf8
+    } catch { }
+  }
+}
+
 function Write-Info([string]$message) {
-  Write-Host ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $message)
+  Write-LogLine $message
 }
 
 function Parse-NameList([string]$s) {
@@ -143,6 +157,19 @@ function Build-ThirdLevelDestSubPath {
   ($parts.ToArray() -join "/")
 }
 
+function Build-SecondLevelDestSubPath {
+  param(
+    [AllowEmptyString()] [string]$BaseSubPath,
+    [Parameter(Mandatory)] [string]$SecondLevelName
+  )
+
+  $parts = New-Object System.Collections.Generic.List[string]
+  $base = Normalize-SubPath $BaseSubPath
+  if (-not [string]::IsNullOrWhiteSpace($base)) { [void]$parts.Add($base) }
+  [void]$parts.Add($SecondLevelName)
+  ($parts.ToArray() -join "/")
+}
+
 function Sanitize-LogName([string]$name) {
   if ([string]::IsNullOrWhiteSpace($name)) { return "unnamed" }
   ($name -replace '[<>:"/\\|?*\x00-\x1F]','_').Trim()
@@ -152,7 +179,8 @@ function Get-ThirdLevelWorkItems {
   param(
     [Parameter(Mandatory)] [string]$ResolvedSourceRoot,
     [System.Collections.Generic.HashSet[string]]$OnlySet,
-    [System.Collections.Generic.HashSet[string]]$ExcludeSet
+    [System.Collections.Generic.HashSet[string]]$ExcludeSet,
+    [switch]$AllowSecondLevelFallback
   )
 
   $items = New-Object System.Collections.Generic.List[object]
@@ -169,12 +197,24 @@ function Get-ThirdLevelWorkItems {
     $thirdLevelDirs = @(Get-ChildItem -LiteralPath $secondDir.FullName -Directory -Force -ErrorAction SilentlyContinue)
 
     if ($thirdLevelDirs.Count -eq 0) {
-      Write-Info ("Omitiendo '{0}': no tiene carpetas de tercer nivel." -f $secondDir.Name)
+      if ($AllowSecondLevelFallback) {
+        Write-Info ("Fallback a segundo nivel para '{0}': no tiene carpetas de tercer nivel." -f $secondDir.Name)
+        $items.Add([pscustomobject]@{
+          WorkLevel       = "SecondLevel"
+          SecondLevelName = $secondDir.Name
+          ThirdLevelName  = $null
+          SourcePath      = $secondDir.FullName
+          DestSubPath     = (Build-SecondLevelDestSubPath -BaseSubPath $DestBaseSubPath -SecondLevelName $secondDir.Name)
+        }) | Out-Null
+      } else {
+        Write-Info ("Omitiendo '{0}': no tiene carpetas de tercer nivel." -f $secondDir.Name)
+      }
       continue
     }
 
     foreach ($thirdDir in $thirdLevelDirs) {
       $items.Add([pscustomobject]@{
+        WorkLevel       = "ThirdLevel"
         SecondLevelName = $secondDir.Name
         ThirdLevelName  = $thirdDir.Name
         SourcePath      = $thirdDir.FullName
@@ -240,14 +280,23 @@ Ensure-Dir $stampedFolder
 
 $LogFile = Join-Path $stampedFolder $logLeaf
 $logParent = $stampedFolder
+$script:MasterLogPath = $LogFile
+
+Write-Info ("Inicio de corrida third-level sync. SourceRoot='{0}' Share='{1}' DestBaseSubPath='{2}'" -f $srcRootResolved, $ShareName, $DestBaseSubPath)
+if ($FallbackToSecondLevel) {
+  Write-Info "Fallback a segundo nivel: ACTIVADO"
+} else {
+  Write-Info "Fallback a segundo nivel: DESACTIVADO"
+}
 
 if (-not $OpenNewWindows) {
+  Write-Info "Modo directo: se sincroniza toda la raiz."
   $code = Invoke-SyncWorker -WorkerSourcePath $srcRootResolved -WorkerDestSubPath $DestBaseSubPath -WorkerLogFile $LogFile
   exit $code
 }
 
 $pwshExe = Get-PwshExe
-$workItems = @(Get-ThirdLevelWorkItems -ResolvedSourceRoot $srcRootResolved -OnlySet $onlySet -ExcludeSet $exclSet)
+$workItems = @(Get-ThirdLevelWorkItems -ResolvedSourceRoot $srcRootResolved -OnlySet $onlySet -ExcludeSet $exclSet -AllowSecondLevelFallback:$FallbackToSecondLevel)
 
 if ($workItems.Count -eq 0) {
   Write-Info "No hay carpetas de tercer nivel para procesar."
@@ -274,10 +323,15 @@ foreach ($item in $workItems) {
   $thirdName  = $item.ThirdLevelName
   $childSrc   = $item.SourcePath
   $destSub    = $item.DestSubPath
+  $workLevel  = $item.WorkLevel
 
   $safeSecond = Sanitize-LogName $secondName
   $safeThird  = Sanitize-LogName $thirdName
-  $childLog   = Join-Path $logParent ("sync-" + $safeSecond + "--" + $safeThird + ".log")
+  $childLog   = if ($workLevel -eq "SecondLevel") {
+    Join-Path $logParent ("sync-" + $safeSecond + ".log")
+  } else {
+    Join-Path $logParent ("sync-" + $safeSecond + "--" + $safeThird + ".log")
+  }
 
   $srcEsc     = Escape-SingleQuotes $childSrc
   $destEsc    = Escape-SingleQuotes $destSub
@@ -286,7 +340,8 @@ foreach ($item in $workItems) {
   $shareEsc   = Escape-SingleQuotes $ShareName
   $sasEsc     = Escape-SingleQuotes (Normalize-Sas $Sas)
   $azEsc      = Escape-SingleQuotes $AzCopyPath
-  $titleEsc   = Escape-SingleQuotes ("SYNC ({0} -> {1})" -f $secondName, $thirdName)
+  $windowTitle = if ($workLevel -eq "SecondLevel") { "SYNC ($secondName)" } else { "SYNC ($secondName -> $thirdName)" }
+  $titleEsc   = Escape-SingleQuotes $windowTitle
 
   $preserveLine = ""
   if ($PreservePermissions) {
@@ -351,11 +406,16 @@ exit 0
 
   if ($p -and $p.Id) { [void]$launchedPids.Add([int]$p.Id) }
 
-  Write-Info ("Lanzado: {0} / {1}" -f $secondName, $thirdName)
+  if ($workLevel -eq "SecondLevel") {
+    Write-Info ("Lanzado fallback segundo nivel: {0} -> {1}" -f $secondName, $destSub)
+  } else {
+    Write-Info ("Lanzado tercer nivel: {0} / {1} -> {2}" -f $secondName, $thirdName, $destSub)
+  }
 
   if ($WindowLaunchDelaySeconds -gt 0) {
     Start-Sleep -Seconds $WindowLaunchDelaySeconds
   }
 }
 
+Write-Info "Orquestacion finalizada."
 exit 0

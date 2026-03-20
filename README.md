@@ -437,6 +437,7 @@ Sincronizar cambios incrementales con `azcopy sync` desde una carpeta origen hac
 - `RamSafeLimit`
 - `DoOnly`
 - `Exclude`
+- `FallbackToSecondLevel`
 - `HoldOnError`
 
 ### Archivos y logs que genera
@@ -504,16 +505,18 @@ Usa la misma interfaz publica que `ps_SyncAzureFiles.ps1`:
 - `RamSafeLimit`
 - `DoOnly`
 - `Exclude`
+- `FallbackToSecondLevel`
 - `HoldOnError`
 
 ### Comportamiento clave
 - si `DestBaseSubPath = ""`, una carpeta local `Segundo\Tercero` termina en `share/Segundo/Tercero`
 - si `DestBaseSubPath = "base"`, esa carpeta termina en `share/base/Segundo/Tercero`
-- si una carpeta de segundo nivel no tiene carpetas de tercer nivel, se omite y se reporta
+- si una carpeta de segundo nivel no tiene carpetas de tercer nivel, se omite y se reporta; con `-FallbackToSecondLevel` se sincroniza ese segundo nivel como unidad de trabajo
 - los nombres se sanean solo para el nombre del log, no para origen ni destino
 
 ### Archivos y logs que genera
 - una carpeta de corrida con timestamp derivada de `LogFile`
+- un log maestro de corrida en la ruta derivada de `LogFile`
 - un log por unidad de trabajo, con formato `sync-<segundo>--<tercero>.log`
 
 ### Ejemplo de uso
@@ -527,12 +530,14 @@ Usa la misma interfaz publica que `ps_SyncAzureFiles.ps1`:
   -AzCopyPath "C:\source\scripts\azcopy.exe" `
   -OpenNewWindows `
   -MaxOpenWindows 2 `
+  -FallbackToSecondLevel `
   -LogFile "C:\source\upload\ServiciosMarinos-thirdlevel\sync.log"
 ```
 
 ### Riesgos y advertencias
 - este script no filtra por tercer nivel en esta primera version
 - si lo ejecutas sin `-OpenNewWindows`, hace un sync directo de toda la raiz
+- si no usas `-FallbackToSecondLevel`, las carpetas de segundo nivel sin hijos se omiten
 - al abrir muchas ventanas, conviene limitar `MaxOpenWindows` y `RamSafeLimit`
 
 ---
