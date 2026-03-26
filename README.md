@@ -433,6 +433,8 @@ Sincronizar cambios incrementales con `azcopy sync` desde una carpeta origen hac
 - `AzCopyPath`
 - `LogFile`
 - `PreservePermissions`
+- `NativeLogLevel`
+- `AzCopyErrorLogSuffix`
 - `AzConcurrency`
 - `AzBufferGB`
 - `OpenNewWindows`
@@ -518,11 +520,13 @@ Usa la misma interfaz publica que `ps_SyncAzureFiles.ps1`:
 - si `DestBaseSubPath = "base"`, esa carpeta termina en `share/base/Segundo/Tercero`
 - si una carpeta de segundo nivel no tiene carpetas de tercer nivel, se omite y se reporta; con `-FallbackToSecondLevel` se sincroniza ese segundo nivel como unidad de trabajo
 - los nombres se sanean solo para el nombre del log, no para origen ni destino
+- crea una carpeta de logs nativos de AzCopy por unidad y anexa su contenido a un archivo `*-azcopy-errors.log`
 
 ### Archivos y logs que genera
 - una carpeta de corrida con timestamp derivada de `LogFile`
 - un log maestro de corrida en la ruta derivada de `LogFile`
 - un log por unidad de trabajo, con formato `sync-<segundo>--<tercero>.log`
+- un log de errores nativos de AzCopy por unidad, con formato `sync-<...>-azcopy-errors.log`
 
 ### Ejemplo de uso
 ```powershell
@@ -576,6 +580,8 @@ Usa casi la misma interfaz publica que `ps_SyncAzureFiles_ThirdLevel.ps1`, con u
 - `AzCopyPath`
 - `LogFile`
 - `PreservePermissions`
+- `NativeLogLevel`
+- `AzCopyErrorLogSuffix`
 - `AzConcurrency`
 - `AzBufferGB`
 - `Overwrite`
@@ -594,12 +600,14 @@ Usa casi la misma interfaz publica que `ps_SyncAzureFiles_ThirdLevel.ps1`, con u
 - si `DestBaseSubPath = "base"`, esa carpeta termina en `share/base/Segundo/Tercero`
 - si una carpeta de segundo nivel no tiene carpetas de tercer nivel, se omite y se reporta; con `-FallbackToSecondLevel` se copia ese segundo nivel como unidad de trabajo
 - escribe un log maestro de corrida y un log por unidad de trabajo
+- crea una carpeta de logs nativos de AzCopy por unidad y anexa su contenido a un archivo `*-azcopy-errors.log`
 - `Overwrite` controla la politica de sobreescritura de AzCopy; default `ifSourceNewer`
 
 ### Archivos y logs que genera
 - una carpeta de corrida con timestamp derivada de `LogFile`
 - un log maestro de corrida en la ruta derivada de `LogFile`
 - un log por unidad de trabajo, con formato `copy-<segundo>--<tercero>.log`
+- un log de errores nativos de AzCopy por unidad, con formato `copy-<...>-azcopy-errors.log`
 
 ### Ejemplo de uso
 ```powershell

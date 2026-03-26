@@ -10,6 +10,8 @@ param(
   [string] $LogFile = ".\azcopy-sync-third-level.log",
 
   [switch] $PreservePermissions,
+  [ValidateSet('ERROR','INFO','WARNING','PANIC')] [string] $NativeLogLevel = 'ERROR',
+  [string] $AzCopyErrorLogSuffix = 'azcopy-errors.log',
 
   [int] $AzConcurrency = 16,
   [int] $AzBufferGB = 1,
@@ -175,6 +177,25 @@ function Sanitize-LogName([string]$name) {
   ($name -replace '[<>:"/\\|?*\x00-\x1F]','_').Trim()
 }
 
+function Build-AzCopyErrorLogPath {
+  param(
+    [Parameter(Mandatory)] [string]$WorkerLogFile,
+    [Parameter(Mandatory)] [string]$Suffix
+  )
+
+  $parent = Split-Path -Path $WorkerLogFile -Parent
+  $leaf = Split-Path -Path $WorkerLogFile -LeafBase
+  Join-Path $parent ("{0}-{1}" -f $leaf, $Suffix)
+}
+
+function Build-AzCopyNativeLogDir {
+  param([Parameter(Mandatory)] [string]$WorkerLogFile)
+
+  $parent = Split-Path -Path $WorkerLogFile -Parent
+  $leaf = Split-Path -Path $WorkerLogFile -LeafBase
+  Join-Path $parent ("{0}-azcopy-native" -f $leaf)
+}
+
 function Get-ThirdLevelWorkItems {
   param(
     [Parameter(Mandatory)] [string]$ResolvedSourceRoot,
@@ -245,19 +266,23 @@ function Invoke-SyncWorker {
 
   $src = (Resolve-Path -LiteralPath $WorkerSourcePath).Path
   $destUrl = Build-FileShareDestUrl -Account $StorageAccount -Share $ShareName -DestSubPath $WorkerDestSubPath -SasToken $Sas
+  $nativeLogDir = Build-AzCopyNativeLogDir -WorkerLogFile $WorkerLogFile
+  $errorLogPath = Build-AzCopyErrorLogPath -WorkerLogFile $WorkerLogFile -Suffix $AzCopyErrorLogSuffix
 
   $prevConc = $env:AZCOPY_CONCURRENCY_VALUE
   $prevBuf  = $env:AZCOPY_BUFFER_GB
+  $prevNativeLogLocation = $env:AZCOPY_LOG_LOCATION
   try {
     $env:AZCOPY_CONCURRENCY_VALUE = [string]$AzConcurrency
     $env:AZCOPY_BUFFER_GB         = [string]$AzBufferGB
+    $env:AZCOPY_LOG_LOCATION      = $nativeLogDir
 
     $args = @(
       "sync", $src, $destUrl,
       "--recursive=true",
       "--delete-destination=false",
       "--output-level=essential",
-      "--log-level=ERROR"
+      "--log-level=$NativeLogLevel"
     )
 
     if ($PreservePermissions) {
@@ -267,13 +292,25 @@ function Invoke-SyncWorker {
     $lp = Split-Path -Path $WorkerLogFile -Parent
     if ([string]::IsNullOrWhiteSpace($lp)) { $lp = "." }
     Ensure-Dir $lp
+    Ensure-Dir $nativeLogDir
 
     & $AzCopyPath @args 2>&1 | Tee-Object -FilePath $WorkerLogFile | Out-Null
+
+    if (Test-Path -LiteralPath $nativeLogDir) {
+      Get-ChildItem -LiteralPath $nativeLogDir -File -Filter '*.log' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime |
+        ForEach-Object {
+          Add-Content -LiteralPath $errorLogPath -Value ("===== " + $_.Name + " =====")
+          Get-Content -LiteralPath $_.FullName -ErrorAction SilentlyContinue | Add-Content -LiteralPath $errorLogPath
+        }
+    }
+
     return $LASTEXITCODE
   }
   finally {
     $env:AZCOPY_CONCURRENCY_VALUE = $prevConc
     $env:AZCOPY_BUFFER_GB         = $prevBuf
+    $env:AZCOPY_LOG_LOCATION      = $prevNativeLogLocation
   }
 }
 
@@ -293,6 +330,8 @@ $logParent = $stampedFolder
 $script:MasterLogPath = $LogFile
 
 Write-Info ("Inicio de corrida third-level sync. SourceRoot='{0}' Share='{1}' DestBaseSubPath='{2}'" -f $srcRootResolved, $ShareName, $DestBaseSubPath)
+Write-Info ("NativeLogLevel: {0}" -f $NativeLogLevel)
+Write-Info ("AzCopyErrorLogSuffix: {0}" -f $AzCopyErrorLogSuffix)
 if ($FallbackToSecondLevel) {
   Write-Info "Fallback a segundo nivel: ACTIVADO"
 } else {
@@ -349,12 +388,17 @@ foreach ($item in $workItems) {
   $srcEsc     = Escape-SingleQuotes $childSrc
   $destEsc    = Escape-SingleQuotes $destSub
   $logEsc     = Escape-SingleQuotes $childLog
+  $errorLogPath = Build-AzCopyErrorLogPath -WorkerLogFile $childLog -Suffix $AzCopyErrorLogSuffix
+  $nativeLogDir = Build-AzCopyNativeLogDir -WorkerLogFile $childLog
+  $errorLogEsc = Escape-SingleQuotes $errorLogPath
+  $nativeLogDirEsc = Escape-SingleQuotes $nativeLogDir
   $accEsc     = Escape-SingleQuotes $StorageAccount
   $shareEsc   = Escape-SingleQuotes $ShareName
   $sasEsc     = Escape-SingleQuotes (Normalize-Sas $Sas)
   $azEsc      = Escape-SingleQuotes $AzCopyPath
   $windowTitle = if ($workLevel -eq "SecondLevel") { "SYNC ($secondName)" } else { "SYNC ($secondName -> $thirdName)" }
   $titleEsc   = Escape-SingleQuotes $windowTitle
+  $nativeLogLevelEsc = Escape-SingleQuotes $NativeLogLevel
 
   $preserveLine = ""
   if ($PreservePermissions) {
@@ -372,6 +416,7 @@ foreach ($item in $workItems) {
 
 function Normalize-SubPath([string]`$p){ (`$p -replace '\\','/').Trim().Trim('/') }
 function Normalize-Sas([string]`$s){ if (`$s.Trim().StartsWith('?')) { `$s.Trim() } else { '?' + `$s.Trim() } }
+function Ensure-Dir([string]`$p){ if ([string]::IsNullOrWhiteSpace(`$p)) { return }; if (-not (Test-Path -LiteralPath `$p)) { New-Item -ItemType Directory -Path `$p -Force | Out-Null } }
 function Build-FileShareDestUrl([string]`$account, [string]`$share, [string]`$destSubPath, [string]`$sasToken) {
   `$sasT = Normalize-Sas `$sasToken;
   `$destSub = Normalize-SubPath `$destSubPath;
@@ -384,24 +429,36 @@ function Build-FileShareDestUrl([string]`$account, [string]`$share, [string]`$de
 
 `$env:AZCOPY_CONCURRENCY_VALUE = '$AzConcurrency';
 `$env:AZCOPY_BUFFER_GB = '$AzBufferGB';
+`$env:AZCOPY_LOG_LOCATION = '$nativeLogDirEsc';
 
 `$src = '$srcEsc';
 `$destUrl = Build-FileShareDestUrl '$accEsc' '$shareEsc' '$destEsc' '$sasEsc';
+Ensure-Dir '$nativeLogDirEsc';
 
 Write-Host '=== SYNC INICIO ===';
 Write-Host "Origen:  `$src";
 Write-Host "Destino: `$destUrl";
+Write-Host "NativeLogLevel: $nativeLogLevelEsc";
 
 `$args = @(
   'sync', `$src, `$destUrl,
   '--recursive=true',
   '--delete-destination=false',
   '--output-level=essential',
-  '--log-level=ERROR'
+  '--log-level=$nativeLogLevelEsc'
 );
 $preserveLine
 
 & '$azEsc' @args 2>&1 | Tee-Object -FilePath '$logEsc' | Out-Null;
+
+if (Test-Path -LiteralPath '$nativeLogDirEsc') {
+  Get-ChildItem -LiteralPath '$nativeLogDirEsc' -File -Filter '*.log' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime |
+    ForEach-Object {
+      Add-Content -LiteralPath '$errorLogEsc' -Value ('===== ' + `$_.Name + ' =====');
+      Get-Content -LiteralPath `$_.FullName -ErrorAction SilentlyContinue | Add-Content -LiteralPath '$errorLogEsc';
+    }
+}
 
 `$code = `$LASTEXITCODE
 Write-Host "=== SYNC FIN (ExitCode=`$code) ===";
@@ -420,9 +477,9 @@ exit 0
   if ($p -and $p.Id) { [void]$launchedPids.Add([int]$p.Id) }
 
   if ($workLevel -eq "SecondLevel") {
-    Write-Info ("Lanzado fallback segundo nivel: {0} -> {1}" -f $secondName, $destSub)
+    Write-Info ("Lanzado fallback segundo nivel: {0} -> {1}. ErrorLog='{2}'." -f $secondName, $destSub, $errorLogPath)
   } else {
-    Write-Info ("Lanzado tercer nivel: {0} / {1} -> {2}" -f $secondName, $thirdName, $destSub)
+    Write-Info ("Lanzado tercer nivel: {0} / {1} -> {2}. ErrorLog='{3}'." -f $secondName, $thirdName, $destSub, $errorLogPath)
   }
 
   if ($WindowLaunchDelaySeconds -gt 0) {
