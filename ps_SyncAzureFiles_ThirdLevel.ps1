@@ -11,7 +11,7 @@ param(
 
   [switch] $PreservePermissions,
   [ValidateSet('ERROR','INFO','WARNING','PANIC')] [string] $NativeLogLevel = 'ERROR',
-  [string] $AzCopyErrorLogSuffix = 'azcopy-errors.log',
+  [string] $AzCopyErrorLogSuffix = 'errors.log',
 
   [int] $AzConcurrency = 16,
   [int] $AzBufferGB = 1,
