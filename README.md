@@ -519,6 +519,7 @@ Usa la misma interfaz publica que `ps_SyncAzureFiles.ps1`:
 - si `DestBaseSubPath = ""`, una carpeta local `Segundo\Tercero` termina en `share/Segundo/Tercero`
 - si `DestBaseSubPath = "base"`, esa carpeta termina en `share/base/Segundo/Tercero`
 - si una carpeta de segundo nivel no tiene carpetas de tercer nivel, se omite y se reporta; con `-FallbackToSecondLevel` se sincroniza ese segundo nivel como unidad de trabajo
+- si detecta archivos sueltos en el segundo nivel, crea una unidad adicional hacia `SegundoNivel/archivos_sueltos`
 - los nombres se sanean solo para el nombre del log, no para origen ni destino
 - crea una carpeta de logs nativos de AzCopy por unidad y anexa su contenido a un archivo `*-errors.log`
 
@@ -565,6 +566,7 @@ Ejecutar una carga por ramas profundas usando `azcopy copy`, lanzando una unidad
 - enumera carpetas de segundo nivel desde `SourceRoot`
 - aplica `DoOnly` y `Exclude` por nombre exacto de segundo nivel
 - dentro de cada carpeta de segundo nivel, enumera sus carpetas de tercer nivel
+- si detecta archivos sueltos en el segundo nivel, crea una unidad adicional hacia `SegundoNivel/archivos_sueltos`
 - lanza una ventana o proceso por cada carpeta de tercer nivel
 - construye el destino conservando `SegundoNivel/TercerNivel`
 - opcionalmente hace fallback al segundo nivel si una carpeta no tiene hijos y usas `-FallbackToSecondLevel`
@@ -599,6 +601,7 @@ Usa casi la misma interfaz publica que `ps_SyncAzureFiles_ThirdLevel.ps1`, con u
 - si `DestBaseSubPath = ""`, una carpeta local `Segundo\Tercero` termina en `share/Segundo/Tercero`
 - si `DestBaseSubPath = "base"`, esa carpeta termina en `share/base/Segundo/Tercero`
 - si una carpeta de segundo nivel no tiene carpetas de tercer nivel, se omite y se reporta; con `-FallbackToSecondLevel` se copia ese segundo nivel como unidad de trabajo
+- si detecta archivos sueltos en el segundo nivel, crea una unidad adicional hacia `SegundoNivel/archivos_sueltos`
 - escribe un log maestro de corrida y un log por unidad de trabajo
 - crea una carpeta de logs nativos de AzCopy por unidad y anexa su contenido a un archivo `*-errors.log`
 - `Overwrite` controla la politica de sobreescritura de AzCopy; default `ifSourceNewer`

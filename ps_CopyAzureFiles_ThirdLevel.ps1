@@ -173,6 +173,20 @@ function Build-SecondLevelDestSubPath {
   ($parts.ToArray() -join "/")
 }
 
+function Build-LooseFilesDestSubPath {
+  param(
+    [AllowEmptyString()] [string]$BaseSubPath,
+    [Parameter(Mandatory)] [string]$SecondLevelName
+  )
+
+  $parts = New-Object System.Collections.Generic.List[string]
+  $base = Normalize-SubPath $BaseSubPath
+  if (-not [string]::IsNullOrWhiteSpace($base)) { [void]$parts.Add($base) }
+  [void]$parts.Add($SecondLevelName)
+  [void]$parts.Add('archivos_sueltos')
+  ($parts.ToArray() -join "/")
+}
+
 function Build-DirectoryContentsSourcePath {
   param([Parameter(Mandatory)] [string]$DirectoryPath)
 
@@ -229,7 +243,24 @@ function Get-ThirdLevelWorkItems {
   foreach ($secondDir in $secondLevelDirs) {
     Write-Info ("Revisando segundo nivel '{0}'..." -f $secondDir.Name)
     $thirdLevelDirs = @(Get-ChildItem -LiteralPath $secondDir.FullName -Directory -Force -ErrorAction SilentlyContinue)
+    $looseFiles = @(Get-ChildItem -LiteralPath $secondDir.FullName -File -Force -ErrorAction SilentlyContinue)
     Write-Info ("'{0}' tiene {1} subcarpetas directas." -f $secondDir.Name, $thirdLevelDirs.Count)
+    Write-Info ("'{0}' tiene {1} archivos sueltos directos." -f $secondDir.Name, $looseFiles.Count)
+
+    if ($looseFiles.Count -gt 0 -and ($thirdLevelDirs.Count -gt 0 -or -not $AllowSecondLevelFallback)) {
+      $looseDest = Build-LooseFilesDestSubPath -BaseSubPath $DestBaseSubPath -SecondLevelName $secondDir.Name
+      $loosePatterns = ($looseFiles | ForEach-Object { $_.Name }) -join ';'
+      Write-Info ("Unidad detectada para archivos sueltos: '{0}' -> '{1}'." -f $secondDir.Name, $looseDest)
+      $items.Add([pscustomobject]@{
+        WorkLevel       = "LooseFiles"
+        SecondLevelName = $secondDir.Name
+        ThirdLevelName  = 'archivos_sueltos'
+        SourcePath      = $secondDir.FullName
+        DestSubPath     = $looseDest
+        IncludePattern  = $loosePatterns
+        Recursive       = $false
+      }) | Out-Null
+    }
 
     if ($thirdLevelDirs.Count -eq 0) {
       if ($AllowSecondLevelFallback) {
@@ -257,6 +288,8 @@ function Get-ThirdLevelWorkItems {
         ThirdLevelName  = $thirdDir.Name
         SourcePath      = $thirdDir.FullName
         DestSubPath     = $destSub
+        IncludePattern  = $null
+        Recursive       = $true
       }) | Out-Null
     }
   }
@@ -269,7 +302,9 @@ function Invoke-CopyWorker {
   param(
     [Parameter(Mandatory)] [string] $WorkerSourcePath,
     [Parameter(Mandatory)] [AllowEmptyString()] [string] $WorkerDestSubPath,
-    [Parameter(Mandatory)] [string] $WorkerLogFile
+    [Parameter(Mandatory)] [string] $WorkerLogFile,
+    [string] $WorkerIncludePattern,
+    [bool] $WorkerRecursive = $true
   )
 
   $resolvedSourceDir = (Resolve-Path -LiteralPath $WorkerSourcePath).Path
@@ -288,11 +323,16 @@ function Invoke-CopyWorker {
 
     $args = @(
       "copy", $src, $destUrl,
-      "--recursive=true",
       "--overwrite=$Overwrite",
       "--output-level=essential",
       "--log-level=$NativeLogLevel"
     )
+    if ($WorkerRecursive) {
+      $args += "--recursive=true"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WorkerIncludePattern)) {
+      $args += @("--include-pattern", $WorkerIncludePattern)
+    }
 
     if ($PreservePermissions) {
       $args += @("--preserve-smb-permissions=true","--preserve-smb-info=true")
@@ -387,6 +427,8 @@ foreach ($item in $workItems) {
   $childSrc   = $item.SourcePath
   $destSub    = $item.DestSubPath
   $workLevel  = $item.WorkLevel
+  $includePattern = $item.IncludePattern
+  $workerRecursive = if ($null -ne $item.Recursive) { [bool]$item.Recursive } else { $true }
 
   $safeSecond = Sanitize-LogName $secondName
   $safeThird  = Sanitize-LogName $thirdName
@@ -409,6 +451,8 @@ foreach ($item in $workItems) {
   $azEsc       = Escape-SingleQuotes $AzCopyPath
   $overwriteEsc = Escape-SingleQuotes $Overwrite
   $nativeLogLevelEsc = Escape-SingleQuotes $NativeLogLevel
+  $includePatternEsc = Escape-SingleQuotes $includePattern
+  $recursiveEsc = if ($workerRecursive) { 'true' } else { 'false' }
   $windowTitle = if ($workLevel -eq "SecondLevel") { "COPY ($secondName)" } else { "COPY ($secondName -> $thirdName)" }
   $titleEsc    = Escape-SingleQuotes $windowTitle
 
@@ -458,14 +502,21 @@ Write-Host "OrigenContenido: `$src";
 Write-Host "Destino: `$destUrl";
 Write-Host "Overwrite: $overwriteEsc";
 Write-Host "NativeLogLevel: $nativeLogLevelEsc";
+Write-Host "Recursive: $recursiveEsc";
+Write-Host "IncludePattern: $includePatternEsc";
 
 `$args = @(
   'copy', `$src, `$destUrl,
-  '--recursive=true',
   '--overwrite=$overwriteEsc',
   '--output-level=essential',
   '--log-level=$nativeLogLevelEsc'
 );
+if ('$recursiveEsc' -eq 'true') {
+  `$args += '--recursive=true';
+}
+if (-not [string]::IsNullOrWhiteSpace('$includePatternEsc')) {
+  `$args += @('--include-pattern', '$includePatternEsc');
+}
 $preserveLine
 
 & '$azEsc' @args 2>&1 | Tee-Object -FilePath '$logEsc' | Out-Null;
@@ -497,6 +548,8 @@ exit 0
 
   if ($workLevel -eq "SecondLevel") {
     Write-Info ("Lanzado fallback segundo nivel con copy: {0} -> {1}. ErrorLog='{2}'." -f $secondName, $destSub, $errorLogPath)
+  } elseif ($workLevel -eq "LooseFiles") {
+    Write-Info ("Lanzado archivos_sueltos con copy: {0} -> {1}. ErrorLog='{2}'." -f $secondName, $destSub, $errorLogPath)
   } else {
     Write-Info ("Lanzado tercer nivel con copy: {0} / {1} -> {2}. ErrorLog='{3}'." -f $secondName, $thirdName, $destSub, $errorLogPath)
   }
