@@ -173,6 +173,13 @@ function Build-SecondLevelDestSubPath {
   ($parts.ToArray() -join "/")
 }
 
+function Build-DirectoryContentsSourcePath {
+  param([Parameter(Mandatory)] [string]$DirectoryPath)
+
+  $trimmed = $DirectoryPath.TrimEnd('\','/')
+  return ($trimmed + [System.IO.Path]::DirectorySeparatorChar + '*')
+}
+
 function Sanitize-LogName([string]$name) {
   if ([string]::IsNullOrWhiteSpace($name)) { return "unnamed" }
   ($name -replace '[<>:"/\\|?*\x00-\x1F]','_').Trim()
@@ -265,7 +272,8 @@ function Invoke-CopyWorker {
     [Parameter(Mandatory)] [string] $WorkerLogFile
   )
 
-  $src = (Resolve-Path -LiteralPath $WorkerSourcePath).Path
+  $resolvedSourceDir = (Resolve-Path -LiteralPath $WorkerSourcePath).Path
+  $src = Build-DirectoryContentsSourcePath -DirectoryPath $resolvedSourceDir
   $destUrl = Build-FileShareDestUrl -Account $StorageAccount -Share $ShareName -DestSubPath $WorkerDestSubPath -SasToken $Sas
   $nativeLogDir = Build-AzCopyNativeLogDir -WorkerLogFile $WorkerLogFile
   $errorLogPath = Build-AzCopyErrorLogPath -WorkerLogFile $WorkerLogFile -Suffix $AzCopyErrorLogSuffix
@@ -334,6 +342,7 @@ Write-Info ("Inicio de corrida third-level copy. SourceRoot='{0}' Share='{1}' De
 Write-Info ("Overwrite: {0}" -f $Overwrite)
 Write-Info ("NativeLogLevel: {0}" -f $NativeLogLevel)
 Write-Info ("AzCopyErrorLogSuffix: {0}" -f $AzCopyErrorLogSuffix)
+Write-Info "Modo copy blindado: se copia el contenido de cada carpeta, no la carpeta contenedora."
 if ($FallbackToSecondLevel) {
   Write-Info "Fallback a segundo nivel: ACTIVADO"
 } else {
@@ -420,6 +429,10 @@ foreach ($item in $workItems) {
 function Normalize-SubPath([string]`$p){ (`$p -replace '\\','/').Trim().Trim('/') }
 function Normalize-Sas([string]`$s){ if (`$s.Trim().StartsWith('?')) { `$s.Trim() } else { '?' + `$s.Trim() } }
 function Ensure-Dir([string]`$p){ if ([string]::IsNullOrWhiteSpace(`$p)) { return }; if (-not (Test-Path -LiteralPath `$p)) { New-Item -ItemType Directory -Path `$p -Force | Out-Null } }
+function Build-DirectoryContentsSourcePath([string]`$directoryPath) {
+  `$trimmed = `$directoryPath.TrimEnd('\','/');
+  return `$trimmed + [System.IO.Path]::DirectorySeparatorChar + '*';
+}
 function Build-FileShareDestUrl([string]`$account, [string]`$share, [string]`$destSubPath, [string]`$sasToken) {
   `$sasT = Normalize-Sas `$sasToken;
   `$destSub = Normalize-SubPath `$destSubPath;
@@ -434,12 +447,14 @@ function Build-FileShareDestUrl([string]`$account, [string]`$share, [string]`$de
 `$env:AZCOPY_BUFFER_GB = '$AzBufferGB';
 `$env:AZCOPY_LOG_LOCATION = '$nativeLogDirEsc';
 
-`$src = '$srcEsc';
+`$srcDir = '$srcEsc';
+`$src = Build-DirectoryContentsSourcePath `$srcDir;
 `$destUrl = Build-FileShareDestUrl '$accEsc' '$shareEsc' '$destEsc' '$sasEsc';
 Ensure-Dir '$nativeLogDirEsc';
 
 Write-Host '=== COPY INICIO ===';
-Write-Host "Origen:  `$src";
+Write-Host "OrigenDir: `$srcDir";
+Write-Host "OrigenContenido: `$src";
 Write-Host "Destino: `$destUrl";
 Write-Host "Overwrite: $overwriteEsc";
 Write-Host "NativeLogLevel: $nativeLogLevelEsc";

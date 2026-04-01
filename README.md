@@ -602,6 +602,7 @@ Usa casi la misma interfaz publica que `ps_SyncAzureFiles_ThirdLevel.ps1`, con u
 - escribe un log maestro de corrida y un log por unidad de trabajo
 - crea una carpeta de logs nativos de AzCopy por unidad y anexa su contenido a un archivo `*-errors.log`
 - `Overwrite` controla la politica de sobreescritura de AzCopy; default `ifSourceNewer`
+- el script usa `ruta\*` como origen real de `azcopy copy` para copiar solo el contenido de la carpeta y evitar duplicados tipo `Carpeta\Carpeta`
 
 ### Archivos y logs que genera
 - una carpeta de corrida con timestamp derivada de `LogFile`
